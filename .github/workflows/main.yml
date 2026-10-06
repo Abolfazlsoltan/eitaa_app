@@ -15,25 +15,21 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # Checkout
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
-      # Java
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -41,56 +37,27 @@ jobs:
           channel: stable
           cache: true
 
-      # Android licenses
       - name: Accept Android licenses
         run: |
           yes | flutter doctor --android-licenses
 
-      # Install Flet
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
           python -m pip install "flet>=1.0"
 
-      # Check project
-      - name: Check project
-        run: |
-          echo "===== Project files ====="
-          find . -maxdepth 3 -type f | sort
-
-          echo ""
-          echo "===== pyproject.toml ====="
-
-          if [ -f pyproject.toml ]; then
-            cat pyproject.toml
-          else
-            echo "ERROR: pyproject.toml not found!"
-            exit 1
-          fi
-
-      # Build APK
       - name: Build APK
         run: |
           mkdir -p build_logs
-
-          echo "===== Starting Flet APK build ====="
-
           set -o pipefail
-
           flet build apk 2>&1 | tee build_logs/flet-build.log
 
-      # Find APK
       - name: Find APK
         if: always()
         run: |
           echo "===== APK files ====="
+          find . -type f -name "*.apk" -print || true
 
-          find . \
-            -type f \
-            -name "*.apk" \
-            -print || true
-
-      # Upload APK
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -101,7 +68,6 @@ jobs:
             **/*.apk
           if-no-files-found: error
 
-      # Upload build log
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
