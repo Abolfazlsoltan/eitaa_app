@@ -1,4 +1,4 @@
-name: Build APK - Try All Versions
+name: Build APK
 
 on:
   push:
@@ -7,125 +7,92 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # تلاش ۱: flet 1.0.3 + پچ jni (همون ترکیبی که قبلاً امتحان کردیم)
-          - name: flet-1.0.3-flutter-3.44.8
-            flet: "1.0.3"
-            flutter: "3.44.8"
-            patch: "true"
-
-          # تلاش ۲: flet 1.0.2
-          - name: flet-1.0.2-flutter-3.44.8
-            flet: "1.0.2"
-            flutter: "3.44.8"
-            patch: "true"
-
-          # تلاش ۳: flet 1.0.1
-          - name: flet-1.0.1-flutter-3.44.8
-            flet: "1.0.1"
-            flutter: "3.44.8"
-            patch: "true"
-
-          # تلاش ۴: flet 1.0.0
-          - name: flet-1.0.0-flutter-3.44.8
-            flet: "1.0.0"
-            flutter: "3.44.8"
-            patch: "true"
-
-          # تلاش ۵: flet 0.28.3 + Flutter قدیمی‌تر (پایدارترین ترکیب)
-          - name: flet-0.28.3-flutter-3.24.5
-            flet: "0.28.3"
-            flutter: "3.24.5"
-            patch: "false"
-
+    timeout-minutes: 60
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Flutter ${{ matrix.flutter }}
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ matrix.flutter }}
+          flutter-version: '3.44.8'
           channel: 'stable'
           cache: true
 
-      - name: Install flet ${{ matrix.flet }}
-        continue-on-error: true
-        run: pip install "flet==${{ matrix.flet }}"
+      - name: Install flet
+        run: pip install flet
 
-      - name: Patch jni pin everywhere (only for flet 1.0.x)
-        if: matrix.patch == 'true'
-        continue-on-error: true
+      - name: Build APK with live pubspec patch
         shell: bash
         run: |
           set +e
-          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "")
-          echo "Site-packages: $SP"
-          echo "Triggering flet-cli download..."
-          flet --version || true
+          echo ">>> Starting flet build in background..."
+          (echo "y" | flet build apk > /tmp/build.log 2>&1) &
+          BUILD_PID=$!
 
-          echo "Searching for flet_cli dirs..."
-          find / -type d -name "flet_cli" 2>/dev/null || true
-
-          echo "Patching jni pins in all candidate locations..."
-          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache" "$HOME/.config"; do
-            [ -d "$DIR" ] || continue
-            find "$DIR" -type f \
-              \( -name "*.py" -o -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" \
-                 -o -name "*.jinja" -o -name "*.jinja2" -o -name "*.txt" \
-                 -o -name "*.json" -o -name "pubspec*" \) -print0 2>/dev/null \
-              | xargs -0 -r grep -l "jni" 2>/dev/null \
-              | while IFS= read -r f; do
-                  echo "Patching: $f"
-                  sed -i -E 's/(jni[^0-9]*[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f" 2>/dev/null || true
-                done
+          PATCHED=0
+          while kill -0 $BUILD_PID 2>/dev/null; do
+            # هر pubspec.yaml که در ۵ دقیقه‌ی اخیر ساخته/تغییر کرده رو پیدا کن
+            for SEARCH in "$HOME" "$RUNNER_WORKSPACE" "/tmp" "$PWD"; do
+              [ -d "$SEARCH" ] || continue
+              find "$SEARCH" -name "pubspec.yaml" -newermt "5 minutes ago" -type f 2>/dev/null | while read f; do
+                if grep -qE "jni[^0-9]*1\.0\.0" "$f" 2>/dev/null; then
+                  echo ">>> PATCHING: $f"
+                  grep -n "jni" "$f" | head -3
+                  sed -i -E 's/(jni[^0-9]*[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f"
+                  echo ">>> AFTER:"
+                  grep -n "jni" "$f" | head -3
+                fi
+              done
+            done
+            sleep 0.3
           done
 
-          echo "Verification - remaining jni 1.0.0 references:"
-          for DIR in "$SP" "$HOME/.flet"; do
-            [ -d "$DIR" ] || continue
-            grep -rn "jni" "$DIR" 2>/dev/null | grep "1\.0\.0" || echo "  None in $DIR"
+          wait $BUILD_PID
+          EXIT=$?
+          echo ">>> flet exited with: $EXIT"
+
+          echo ">>> ALL pubspec.yaml files with jni after build:"
+          find "$HOME" "$RUNNER_WORKSPACE" "/tmp" "$PWD" -name "pubspec.yaml" -type f 2>/dev/null | while read f; do
+            if grep -q "jni" "$f" 2>/dev/null; then
+              echo "--- $f ---"
+              grep "jni" "$f"
+            fi
           done
-          exit 0
 
-      - name: Build APK
-        id: build
-        continue-on-error: true
-        env:
-          CI: "true"
-        run: echo "y" | flet build apk
+          echo ">>> Tail of build log:"
+          tail -60 /tmp/build.log
 
-      - name: Show build result
+          exit $EXIT
+
+      - name: Locate APK anywhere
         if: always()
         run: |
-          if [ "${{ steps.build.outcome }}" = "success" ]; then
-            echo "✅ Build succeeded for ${{ matrix.name }}"
-            ls -la build/apk/ || true
-          else
-            echo "❌ Build failed for ${{ matrix.name }}"
-          fi
+          echo "=== Searching for any APK on the system ==="
+          find / -name "*.apk" 2>/dev/null | head -20 || true
 
-      - name: Upload APK artifact
-        if: steps.build.outcome == 'success'
+      - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ matrix.name }}
-          path: build/apk/*.apk
+          name: apk-result
+          path: |
+            build/**/*.apk
+            **/*.apk
           if-no-files-found: warn
-          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: /tmp/build.log
+          if-no-files-found: warn
