@@ -1,0 +1,13 @@
+[project]
+name = "eitaa-channel-manager"
+version = "0.1.0"
+description = "Eitaa Channel Manager — Android client"
+requires-python = ">=3.10"
+dependencies = ["flet>=1.0", "httpx"]
+
+[tool.flet]
+product = "مدیریت کانال ایتا"
+org = "app.eitaachannelmanager"
+
+[tool.flet.app]
+path = "."
