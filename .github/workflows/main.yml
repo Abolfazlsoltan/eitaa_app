@@ -16,13 +16,13 @@ jobs:
 
     steps:
       # ==============================
-      # Checkout
+      # Checkout repository
       # ==============================
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ==============================
-      # Python
+      # Setup Python
       # ==============================
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,10 +31,8 @@ jobs:
           cache: pip
 
       # ==============================
-      # Java
+      # Setup Java
       # ==============================
-      # Do NOT use cache: gradle here.
-      # Flet creates the Android/Gradle project during the build.
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
@@ -42,7 +40,7 @@ jobs:
           java-version: "17"
 
       # ==============================
-      # Flutter
+      # Setup Flutter
       # ==============================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -68,6 +66,20 @@ jobs:
           flutter --version
 
       # ==============================
+      # Accept Android licenses
+      # ==============================
+      - name: Accept Android SDK licenses
+        run: |
+          yes | flutter doctor --android-licenses
+
+      # ==============================
+      # Check Android toolchain
+      # ==============================
+      - name: Check Android toolchain
+        run: |
+          flutter doctor -v
+
+      # ==============================
       # Install Flet
       # ==============================
       - name: Install Flet
@@ -76,9 +88,9 @@ jobs:
           python -m pip install "flet>=1.0"
 
       # ==============================
-      # Check project
+      # Check project files
       # ==============================
-      - name: Check project files
+      - name: Check project
         run: |
           echo "===== Project structure ====="
           find . -maxdepth 3 -type f | sort
@@ -120,7 +132,7 @@ jobs:
             -print || true
 
       # ==============================
-      # Show build directory
+      # Inspect build directory
       # ==============================
       - name: Inspect build directory
         if: always()
