@@ -6,25 +6,23 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build APK with Flet Action
+        uses: flet-dev/flet-build-action@v1
         with:
-          python-version: '3.12'
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
-      - name: Install flet
-        run: pip install flet
-      - name: Build APK
-        run: flet build apk --yes
-        env:
-          FLUTTER_ROOT: ${{ steps.flutter-action.outputs.flutter-root }}
+          target: apk
+          # این گزینه باعث می‌شود اکشن به صورت خودکار
+          # تمام پیش‌نیازها از جمله Flutter و Android SDK را نصب کند
+          # و به هیچ سوال تعاملی پاسخ ندهد.
+          # نیازی به تنظیم دستی JAVA_HOME یا Flutter نیست.
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: apk
+          name: apk-build
           path: build/apk/*.apk
