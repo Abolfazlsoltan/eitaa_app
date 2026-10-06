@@ -36,25 +36,7 @@ jobs:
           set +e
           echo ">>> Starting flet build in background..."
           (echo "y" | flet build apk > /tmp/build.log 2>&1) &
-          BUILD_PID=$!
-
-          PATCHED=0
-          while kill -0 $BUILD_PID 2>/dev/null; do
-            # هر pubspec.yaml که در ۵ دقیقه‌ی اخیر ساخته/تغییر کرده رو پیدا کن
-            for SEARCH in "$HOME" "$RUNNER_WORKSPACE" "/tmp" "$PWD"; do
-              [ -d "$SEARCH" ] || continue
-              find "$SEARCH" -name "pubspec.yaml" -newermt "5 minutes ago" -type f 2>/dev/null | while read f; do
-                if grep -qE "jni[^0-9]*1\.0\.0" "$f" 2>/dev/null; then
-                  echo ">>> PATCHING: $f"
-                  grep -n "jni" "$f" | head -3
-                  sed -i -E 's/(jni[^0-9]*[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f"
-                  echo ">>> AFTER:"
-                  grep -n "jni" "$f" | head -3
-                fi
-              done
-            done
-            sleep 0.3
-          done
+          BUILD_PID=$
 
           wait $BUILD_PID
           EXIT=$?
