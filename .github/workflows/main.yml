@@ -33,6 +33,27 @@ jobs:
       - name: Install flet
         run: pip install flet
 
+      - name: Patch flet's jni pin
+        run: |
+          # پیدا کردن مسیر سایتپکیجها
+          SP=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "Site-packages: $SP"
+          # پیدا کردن هر فایلی که jni رو پین کرده
+          grep -rln "jni" "$SP/flet_cli" 2>/dev/null || true
+          # پچ همه فایلهای پایتون در flet_cli که jni: 1.0.0 دارن
+          find "$SP/flet_cli" -name "*.py" -exec grep -l "jni" {} \; 2>/dev/null | while read f; do
+            echo "Patching: $f"
+            sed -i 's/jni: 1\.0\.0/jni: 1.1.0/g' "$f"
+            sed -i 's/"jni": "1\.0\.0"/"jni": "1.1.0"/g' "$f"
+            sed -i "s/'jni': '1\.0\.0'/'jni': '1.1.0'/g" "$f"
+          done
+          # همچنین دنبال فایلهای tmpl/yaml/txt بگرد
+          find "$SP/flet_cli" -type f \( -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" -o -name "*.txt" -o -name "*.jinja" -o -name "*.jinja2" \) -exec grep -l "jni" {} \; 2>/dev/null | while read f; do
+            echo "Patching: $f"
+            sed -i 's/jni: 1\.0\.0/jni: 1.1.0/g' "$f"
+            sed -i 's/jni: "1\.0\.0"/jni: "1.1.0"/g' "$f"
+          done
+
       - name: Build APK
         run: echo "y" | flet build apk
         env:
