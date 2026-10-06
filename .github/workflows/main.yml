@@ -33,25 +33,42 @@ jobs:
       - name: Install flet
         run: pip install flet
 
-      - name: Patch flet's jni pin
+      - name: Diagnose and patch jni pin everywhere
         run: |
-          # پیدا کردن مسیر سایتپکیجها
+          set -x
           SP=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "Site-packages: $SP"
-          # پیدا کردن هر فایلی که jni رو پین کرده
-          grep -rln "jni" "$SP/flet_cli" 2>/dev/null || true
-          # پچ همه فایلهای پایتون در flet_cli که jni: 1.0.0 دارن
-          find "$SP/flet_cli" -name "*.py" -exec grep -l "jni" {} \; 2>/dev/null | while read f; do
-            echo "Patching: $f"
-            sed -i 's/jni: 1\.0\.0/jni: 1.1.0/g' "$f"
-            sed -i 's/"jni": "1\.0\.0"/"jni": "1.1.0"/g' "$f"
-            sed -i "s/'jni': '1\.0\.0'/'jni': '1.1.0'/g" "$f"
+
+          echo "=== Trigger flet-cli download ==="
+          flet --version || true
+
+          echo "=== Search for flet_cli dirs ==="
+          find / -type d -name "flet_cli" 2>/dev/null
+          find / -type d -name "flet-cli" 2>/dev/null
+
+          echo "=== All files with jni references ==="
+          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache"; do
+            if [ -d "$DIR" ]; then
+              grep -rn "jni" "$DIR" 2>/dev/null | grep -E "1\.0\.0|1\.1\.0" | head -40 || true
+            fi
           done
-          # همچنین دنبال فایلهای tmpl/yaml/txt بگرد
-          find "$SP/flet_cli" -type f \( -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" -o -name "*.txt" -o -name "*.jinja" -o -name "*.jinja2" \) -exec grep -l "jni" {} \; 2>/dev/null | while read f; do
-            echo "Patching: $f"
-            sed -i 's/jni: 1\.0\.0/jni: 1.1.0/g' "$f"
-            sed -i 's/jni: "1\.0\.0"/jni: "1.1.0"/g' "$f"
+
+          echo "=== Now patching ==="
+          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache"; do
+            if [ -d "$DIR" ]; then
+              find "$DIR" -type f \( -name "*.py" -o -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" -o -name "*.jinja" -o -name "*.jinja2" -o -name "*.txt" -o -name "*.json" \) 2>/dev/null | while read f; do
+                if grep -q "jni" "$f" 2>/dev/null; then
+                  echo "Patching: $f"
+                  # regex انعطاف‌پذیر: هر جا jni با 1.0.0 اومده باشه، به 1.1.0 عوض کن
+                  sed -i -E 's/(jni['"'"'":= ]+[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f" || true
+                fi
+              done
+            fi
+          done
+
+          echo "=== Verify patch ==="
+          for DIR in "$SP" "$HOME/.flet"; do
+            grep -rn "jni" "$DIR" 2>/dev/null | grep "1\.0\.0" || echo "No more jni 1.0.0 in $DIR"
           done
 
       - name: Build APK
