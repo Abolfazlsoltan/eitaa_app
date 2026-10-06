@@ -15,118 +15,127 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # -----------------------------
-      # 1. دریافت سورس پروژه
-      # -----------------------------
+      # ==============================
+      # Checkout
+      # ==============================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # 2. نصب Python
-      # -----------------------------
+      # ==============================
+      # Python
+      # ==============================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
+          cache: pip
 
-      # -----------------------------
-      # 3. نصب Java
-      # -----------------------------
+      # ==============================
+      # Java
+      # ==============================
+      # Do NOT use cache: gradle here.
+      # Flet creates the Android/Gradle project during the build.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: "temurin"
+          distribution: temurin
           java-version: "17"
-          cache: "gradle"
 
-      # -----------------------------
-      # 4. نصب Flutter
-      # -----------------------------
+      # ==============================
+      # Flutter
+      # ==============================
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.44.8"
-          channel: "stable"
+          channel: stable
           cache: true
 
-      # -----------------------------
-      # 5. بررسی نسخه‌ها
-      # -----------------------------
-      - name: Check build environment
+      # ==============================
+      # Show environment
+      # ==============================
+      - name: Check environment
         run: |
-          echo "=== Python ==="
+          echo "===== Python ====="
           python --version
 
-          echo "=== Java ==="
+          echo ""
+          echo "===== Java ====="
           java -version
 
-          echo "=== Flutter ==="
+          echo ""
+          echo "===== Flutter ====="
           flutter --version
 
-      # -----------------------------
-      # 6. نصب Flet
-      # -----------------------------
+      # ==============================
+      # Install Flet
+      # ==============================
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
           python -m pip install "flet>=1.0"
 
-      # -----------------------------
-      # 7. بررسی پروژه
-      # -----------------------------
-      - name: Verify project
+      # ==============================
+      # Check project
+      # ==============================
+      - name: Check project files
         run: |
-          echo "=== Project files ==="
+          echo "===== Project structure ====="
           find . -maxdepth 3 -type f | sort
 
           echo ""
-          echo "=== pyproject.toml ==="
-          cat pyproject.toml
+          echo "===== pyproject.toml ====="
 
-      # -----------------------------
-      # 8. ساخت APK
-      # -----------------------------
+          if [ -f pyproject.toml ]; then
+            cat pyproject.toml
+          else
+            echo "ERROR: pyproject.toml not found!"
+            exit 1
+          fi
+
+      # ==============================
+      # Build APK
+      # ==============================
       - name: Build APK
         run: |
           mkdir -p build_logs
 
-          set -o pipefail
+          echo "===== Starting Flet APK build ====="
 
-          echo "Starting Flet APK build..."
+          set -o pipefail
 
           flet build apk 2>&1 | tee build_logs/flet-build.log
 
-      # -----------------------------
-      # 9. پیدا کردن APK
-      # -----------------------------
-      - name: Locate APK
+      # ==============================
+      # Find APK
+      # ==============================
+      - name: Find APK
         if: always()
         run: |
-          echo "=== APK files ==="
+          echo "===== Searching for APK files ====="
 
           find . \
             -type f \
-            \( -name "*.apk" -o -name "*.aab" \) \
+            -name "*.apk" \
             -print || true
 
-      # -----------------------------
-      # 10. نمایش اطلاعات Build
-      # -----------------------------
-      - name: Show build directory
+      # ==============================
+      # Show build directory
+      # ==============================
+      - name: Inspect build directory
         if: always()
         run: |
-          echo "=== Build directory ==="
+          echo "===== Build directory ====="
 
-          if [ -d "build" ]; then
-            find build -maxdepth 5 -type f -print
+          if [ -d build ]; then
+            find build -maxdepth 6 -type f -print
           else
-            echo "build directory does not exist."
+            echo "No build directory found."
           fi
 
-      # -----------------------------
-      # 11. ذخیره APK
-      # -----------------------------
+      # ==============================
+      # Upload APK
+      # ==============================
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -137,9 +146,9 @@ jobs:
             **/*.apk
           if-no-files-found: error
 
-      # -----------------------------
-      # 12. ذخیره لاگ Build
-      # -----------------------------
+      # ==============================
+      # Upload build log
+      # ==============================
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
