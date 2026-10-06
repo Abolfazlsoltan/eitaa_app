@@ -2,79 +2,148 @@ name: Build APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apk:
+    name: Build Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
     steps:
-      - uses: actions/checkout@v4
+      # -----------------------------
+      # 1. دریافت سورس پروژه
+      # -----------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # -----------------------------
+      # 2. نصب Python
+      # -----------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+          cache: "pip"
 
-      - uses: actions/setup-java@v4
+      # -----------------------------
+      # 3. نصب Java
+      # -----------------------------
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: "temurin"
+          java-version: "17"
+          cache: "gradle"
 
-      - uses: subosito/flutter-action@v2
+      # -----------------------------
+      # 4. نصب Flutter
+      # -----------------------------
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
-          channel: 'stable'
+          flutter-version: "3.44.8"
+          channel: "stable"
           cache: true
 
-      - name: Install flet
-        run: pip install flet
-
-      - name: Build APK with live pubspec patch
-        shell: bash
+      # -----------------------------
+      # 5. بررسی نسخه‌ها
+      # -----------------------------
+      - name: Check build environment
         run: |
-          set +e
-          echo ">>> Starting flet build in background..."
-          (echo "y" | flet build apk > /tmp/build.log 2>&1) &
-          BUILD_PID=$
+          echo "=== Python ==="
+          python --version
 
-          wait $BUILD_PID
-          EXIT=$?
-          echo ">>> flet exited with: $EXIT"
+          echo "=== Java ==="
+          java -version
 
-          echo ">>> ALL pubspec.yaml files with jni after build:"
-          find "$HOME" "$RUNNER_WORKSPACE" "/tmp" "$PWD" -name "pubspec.yaml" -type f 2>/dev/null | while read f; do
-            if grep -q "jni" "$f" 2>/dev/null; then
-              echo "--- $f ---"
-              grep "jni" "$f"
-            fi
-          done
+          echo "=== Flutter ==="
+          flutter --version
 
-          echo ">>> Tail of build log:"
-          tail -60 /tmp/build.log
+      # -----------------------------
+      # 6. نصب Flet
+      # -----------------------------
+      - name: Install Flet
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "flet>=1.0"
 
-          exit $EXIT
+      # -----------------------------
+      # 7. بررسی پروژه
+      # -----------------------------
+      - name: Verify project
+        run: |
+          echo "=== Project files ==="
+          find . -maxdepth 3 -type f | sort
 
-      - name: Locate APK anywhere
+          echo ""
+          echo "=== pyproject.toml ==="
+          cat pyproject.toml
+
+      # -----------------------------
+      # 8. ساخت APK
+      # -----------------------------
+      - name: Build APK
+        run: |
+          mkdir -p build_logs
+
+          set -o pipefail
+
+          echo "Starting Flet APK build..."
+
+          flet build apk 2>&1 | tee build_logs/flet-build.log
+
+      # -----------------------------
+      # 9. پیدا کردن APK
+      # -----------------------------
+      - name: Locate APK
         if: always()
         run: |
-          echo "=== Searching for any APK on the system ==="
-          find / -name "*.apk" 2>/dev/null | head -20 || true
+          echo "=== APK files ==="
 
+          find . \
+            -type f \
+            \( -name "*.apk" -o -name "*.aab" \) \
+            -print || true
+
+      # -----------------------------
+      # 10. نمایش اطلاعات Build
+      # -----------------------------
+      - name: Show build directory
+        if: always()
+        run: |
+          echo "=== Build directory ==="
+
+          if [ -d "build" ]; then
+            find build -maxdepth 5 -type f -print
+          else
+            echo "build directory does not exist."
+          fi
+
+      # -----------------------------
+      # 11. ذخیره APK
+      # -----------------------------
       - name: Upload APK
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: apk-result
+          name: eitaa-app-apk
           path: |
             build/**/*.apk
             **/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
 
+      # -----------------------------
+      # 12. ذخیره لاگ Build
+      # -----------------------------
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: /tmp/build.log
+          name: eitaa-app-build-log
+          path: build_logs/flet-build.log
           if-no-files-found: warn
