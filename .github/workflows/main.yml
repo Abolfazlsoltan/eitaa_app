@@ -13,10 +13,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: 'stable'
       - name: Install flet
         run: pip install flet
       - name: Build APK
         run: flet build apk --yes
+        env:
+          FLUTTER_ROOT: ${{ steps.flutter-action.outputs.flutter-root }}
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
