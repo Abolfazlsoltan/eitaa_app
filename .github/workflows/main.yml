@@ -1,4 +1,4 @@
-name: Build APK
+name: Build APK - Try All Versions
 
 on:
   push:
@@ -7,12 +7,47 @@ on:
 
 jobs:
   build:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # تلاش ۱: flet 1.0.3 + پچ jni (همون ترکیبی که قبلاً امتحان کردیم)
+          - name: flet-1.0.3-flutter-3.44.8
+            flet: "1.0.3"
+            flutter: "3.44.8"
+            patch: "true"
+
+          # تلاش ۲: flet 1.0.2
+          - name: flet-1.0.2-flutter-3.44.8
+            flet: "1.0.2"
+            flutter: "3.44.8"
+            patch: "true"
+
+          # تلاش ۳: flet 1.0.1
+          - name: flet-1.0.1-flutter-3.44.8
+            flet: "1.0.1"
+            flutter: "3.44.8"
+            patch: "true"
+
+          # تلاش ۴: flet 1.0.0
+          - name: flet-1.0.0-flutter-3.44.8
+            flet: "1.0.0"
+            flutter: "3.44.8"
+            patch: "true"
+
+          # تلاش ۵: flet 0.28.3 + Flutter قدیمی‌تر (پایدارترین ترکیب)
+          - name: flet-0.28.3-flutter-3.24.5
+            flet: "0.28.3"
+            flutter: "3.24.5"
+            patch: "false"
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -23,63 +58,74 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Flutter
+      - name: Setup Flutter ${{ matrix.flutter }}
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: ${{ matrix.flutter }}
           channel: 'stable'
           cache: true
 
-      - name: Install flet
-        run: pip install flet
+      - name: Install flet ${{ matrix.flet }}
+        continue-on-error: true
+        run: pip install "flet==${{ matrix.flet }}"
 
-      - name: Diagnose and patch jni pin everywhere
+      - name: Patch jni pin everywhere (only for flet 1.0.x)
+        if: matrix.patch == 'true'
+        continue-on-error: true
+        shell: bash
         run: |
-          set -x
-          SP=$(python -c "import site; print(site.getsitepackages()[0])")
+          set +e
+          SP=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "")
           echo "Site-packages: $SP"
-
-          echo "=== Trigger flet-cli download ==="
+          echo "Triggering flet-cli download..."
           flet --version || true
 
-          echo "=== Search for flet_cli dirs ==="
-          find / -type d -name "flet_cli" 2>/dev/null
-          find / -type d -name "flet-cli" 2>/dev/null
+          echo "Searching for flet_cli dirs..."
+          find / -type d -name "flet_cli" 2>/dev/null || true
 
-          echo "=== All files with jni references ==="
-          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache"; do
-            if [ -d "$DIR" ]; then
-              grep -rn "jni" "$DIR" 2>/dev/null | grep -E "1\.0\.0|1\.1\.0" | head -40 || true
-            fi
-          done
-
-          echo "=== Now patching ==="
-          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache"; do
-            if [ -d "$DIR" ]; then
-              find "$DIR" -type f \( -name "*.py" -o -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" -o -name "*.jinja" -o -name "*.jinja2" -o -name "*.txt" -o -name "*.json" \) 2>/dev/null | while read f; do
-                if grep -q "jni" "$f" 2>/dev/null; then
+          echo "Patching jni pins in all candidate locations..."
+          for DIR in "$SP" "$HOME/.flet" "$HOME/.local" "$HOME/.cache" "$HOME/.config"; do
+            [ -d "$DIR" ] || continue
+            find "$DIR" -type f \
+              \( -name "*.py" -o -name "*.tmpl" -o -name "*.yaml" -o -name "*.yml" \
+                 -o -name "*.jinja" -o -name "*.jinja2" -o -name "*.txt" \
+                 -o -name "*.json" -o -name "pubspec*" \) -print0 2>/dev/null \
+              | xargs -0 -r grep -l "jni" 2>/dev/null \
+              | while IFS= read -r f; do
                   echo "Patching: $f"
-                  # regex انعطاف‌پذیر: هر جا jni با 1.0.0 اومده باشه، به 1.1.0 عوض کن
-                  sed -i -E 's/(jni['"'"'":= ]+[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f" || true
-                fi
-              done
-            fi
+                  sed -i -E 's/(jni[^0-9]*[\^>=~ ]*)1\.0\.0/\11.1.0/g' "$f" 2>/dev/null || true
+                done
           done
 
-          echo "=== Verify patch ==="
+          echo "Verification - remaining jni 1.0.0 references:"
           for DIR in "$SP" "$HOME/.flet"; do
-            grep -rn "jni" "$DIR" 2>/dev/null | grep "1\.0\.0" || echo "No more jni 1.0.0 in $DIR"
+            [ -d "$DIR" ] || continue
+            grep -rn "jni" "$DIR" 2>/dev/null | grep "1\.0\.0" || echo "  None in $DIR"
           done
+          exit 0
 
       - name: Build APK
-        run: echo "y" | flet build apk
+        id: build
+        continue-on-error: true
         env:
           CI: "true"
+        run: echo "y" | flet build apk
 
-      - name: Upload APK
+      - name: Show build result
+        if: always()
+        run: |
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "✅ Build succeeded for ${{ matrix.name }}"
+            ls -la build/apk/ || true
+          else
+            echo "❌ Build failed for ${{ matrix.name }}"
+          fi
+
+      - name: Upload APK artifact
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
-        if: success()
         with:
-          name: apk
+          name: apk-${{ matrix.name }}
           path: build/apk/*.apk
           if-no-files-found: warn
+          retention-days: 7
