@@ -3,7 +3,10 @@ name = "eitaa-channel-manager"
 version = "0.1.0"
 description = "Eitaa Channel Manager - Android client"
 requires-python = ">=3.10"
-dependencies = ["flet>=1.0", "httpx"]
+dependencies = [
+    "flet>=1.0",
+    "httpx",
+]
 
 [tool.flet]
 product = "Eitaa Channel Manager"
@@ -11,3 +14,9 @@ org = "app.eitaachannelmanager"
 
 [tool.flet.app]
 path = "src"
+
+# Fix JNI dependency conflict during Android build.
+# jni_flutter 1.0.4+1 requires jni >= 1.1.0,
+# while the generated Flet project may otherwise override jni to 1.0.0.
+[tool.flet.flutter.pubspec.dependency_overrides]
+jni = "1.1.0"
