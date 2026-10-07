@@ -1,4 +1,177 @@
-build/
+# =============================================================================
+# Eitaa Channel Manager — repository ignore rules
+# =============================================================================
+# The repository contains two parts:
+#   * the client (src/, assets/, pyproject.toml)
+#   * the backend (backend/)
+# Keep sections separate so it is obvious which rule belongs to which part.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Python bytecode and caches
+# -----------------------------------------------------------------------------
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+
+# -----------------------------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.venv*/
+pythonenv*/
+.python-version
+
+
+# -----------------------------------------------------------------------------
+# Test and coverage artifacts
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+
+# -----------------------------------------------------------------------------
+# Flet / Flutter build artifacts (client)
+# -----------------------------------------------------------------------------
+.flet/
+flet-build/
+# `build/` already ignored above; kept here as a reminder that the Flet
+# build directory is one of the things this section covers.
+
+# Generated Flutter/Dart scaffolding when the Flet build system runs
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+flutter/
+*.iml
+.gradle/
+local.properties
+
+# Android signing (keystore, private keys) — never commit these
+*.jks
+*.keystore
+key.properties
+android/app/upload-keystore.jks
+
+
+# -----------------------------------------------------------------------------
+# Backend runtime data (server)
+# -----------------------------------------------------------------------------
+# SQLite database (created by `init()` on first run).
+backend/*.db
+backend/*.db-journal
+backend/*.sqlite
+backend/*.sqlite3
+backend/data.db
+
+# Uploaded media — user files, never committed.
+backend/media/
+backend/uploads/
+
+# Python package metadata generated inside the backend folder.
+backend/*.egg-info/
+
+
+# -----------------------------------------------------------------------------
+# Environment files — real values, never commit
+# -----------------------------------------------------------------------------
+# These hold secrets: APP_SECRET_KEY, AI_API_KEY, EITAA_WEBAPP_BOT_TOKEN…
 .env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+
+# -----------------------------------------------------------------------------
+# OS-specific junk
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+
+# -----------------------------------------------------------------------------
+# Editor / IDE settings
+# -----------------------------------------------------------------------------
+# VS Code: ignore everything except the workspace-wide settings we may want
+# to share with the team.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+.nvim/
+*.sublime-workspace
+*.sublime-project
+
+
+# -----------------------------------------------------------------------------
+# Logs and temporary files
+# -----------------------------------------------------------------------------
+*.log
+logs/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.pid
+*.seed
+
+
+# -----------------------------------------------------------------------------
+# CI / build logs (uploaded as artifacts, not committed)
+# -----------------------------------------------------------------------------
+build_logs/
+
+
+# -----------------------------------------------------------------------------
+# Local-only files (personal notes, TODO scratchpads)
+# -----------------------------------------------------------------------------
+NOTES.md
+TODO.md
+scratch/
+sandbox/
