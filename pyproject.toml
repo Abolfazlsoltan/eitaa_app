@@ -1,22 +1,86 @@
+# =============================================================================
+# Eitaa Channel Manager — Android/desktop client
+# =============================================================================
+# This file only configures the Flet client. The FastAPI backend lives under
+# backend/ and is not affected by anything here.
+#
+# Build the APK:
+#     flet build apk
+#
+# Run on desktop during development:
+#     flet run src/main.py
+# =============================================================================
+
 [project]
 name = "eitaa-channel-manager"
-version = "0.1.0"
-description = "Eitaa Channel Manager - Android client"
+version = "1.1.0"
+description = "Eitaa Channel Manager — Android/desktop client"
 requires-python = ">=3.10"
 dependencies = [
     "flet>=1.0",
-    "httpx",
+    "httpx>=0.27",
 ]
 
+# -----------------------------------------------------------------------------
+# Flet app metadata
+# -----------------------------------------------------------------------------
 [tool.flet]
-product = "Eitaa Channel Manager"
+# Launcher name and window title. Shown to the end user, so it uses the
+# Persian name they recognize. Keep it short — some Android launchers
+# truncate long names.
+product = "مدیریت کانال ایتا"
+
+# Reverse-DNS identifier. Must be unique and stable:
+#   * Changing it after a release creates a new app on the device.
+#   * It is used as the Android package name and the desktop bundle id.
 org = "app.eitaachannelmanager"
 
+# App icon. Must be a PNG, ideally 1024×1024 or larger and square.
+# It is used for the Android launcher, the desktop window icon, and the
+# .ico when packaging Windows.
+icon = "assets/icon.png"
+
+# -----------------------------------------------------------------------------
+# Where the app entry point lives
+# -----------------------------------------------------------------------------
 [tool.flet.app]
+# The client code (main.py, api.py, fa.py, local.py, config.py) lives in src/.
 path = "src"
 
-# Fix JNI dependency conflict during Android build.
-# jni_flutter 1.0.4+1 requires jni >= 1.1.0,
-# while the generated Flet project may otherwise override jni to 1.0.0.
+# Folder bundled with the app and readable at runtime from relative paths
+# (e.g. "assets/icon.png"). Must exist even if empty.
+assets_dir = "assets"
+
+# -----------------------------------------------------------------------------
+# Android build fixes
+# -----------------------------------------------------------------------------
+# jni_flutter 1.0.4+1 requires jni >= 1.1.0, while the generated Flet
+# project may otherwise pin jni to 1.0.0, causing a Gradle dependency
+# conflict. This override forces a compatible version.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni = "1.1.0"
+
+# -----------------------------------------------------------------------------
+# Notes for future builds — do not uncomment unless needed
+# -----------------------------------------------------------------------------
+#
+# 1) INTERNET permission
+#    The client needs internet access to talk to Groq (AI) and EitaaYar
+#    (publishing). Flet adds `android.permission.INTERNET` automatically, so
+#    no explicit entry is needed here. If a future Flet version stops adding
+#    it, add:
+#
+#        [tool.flet.android.permission]
+#        "android.permission.INTERNET" = true
+#
+# 2) Cleartext HTTP (only needed for testing server mode locally)
+#    Android 9+ blocks plain http:// traffic by default. The current build
+#    runs in LOCAL mode (see src/config.py) and only talks to https://
+#    endpoints, so cleartext stays disabled — which is the safe choice.
+#
+#    If you later switch to server mode and test against a local backend
+#    over http://, uncomment the block below AND set ALLOW_CLEARTEXT = True
+#    in src/config.py, then rebuild:
+#
+#        [tool.flet.android]
+#        cleartext_traffic = true
