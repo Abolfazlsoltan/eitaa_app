@@ -1,21 +1,36 @@
-"""Local-only backend for the client when no FastAPI server is reachable.
+"""Local (offline) backend for the Eitaa Channel Manager client.
 
-Provides a subset of the server's operations using only what is available
-on the device:
+When `config.MODE == "local"`, the client does not talk to a FastAPI
+server. Instead, `api.py` routes every request to the `LocalBackend`
+class defined here.
 
-    * Data (posts, templates, channels, connections, activity log) stored in
-      page.client_storage as JSON blobs.
-    * AI calls go directly to Groq using the user's own API key.
-    * Post sending goes directly to EitaaYar using the user's own token.
+What this module supports
+-------------------------
+    * Auto-connecting the default channel and EitaaYar bot on first run,
+      using the credentials baked into `config.py`.
+    * Direct AI calls to Groq (with the API key from `config.py`).
+    * Direct publishing to EitaaYar (sendMessage only — no media upload,
+      since that requires a persistent storage layer).
+    * Local persistence of posts, templates, activity log and simple
+      statistics using `page.client_storage`.
 
-Not supported locally (handlers raise LocalError with a Persian message):
-    * Multi-user, roles, team management
-    * Server-side scheduling / queue / worker
-    * Media library (large files are not persisted on-device)
-    * Advanced analytics, automations
+What this module deliberately does NOT support
+----------------------------------------------
+Operations that strictly require a 24/7 worker or a shared database:
 
-The dispatcher `LocalBackend.handle()` speaks the same (method, path, body)
-shape as the real HTTP client, so `api.py` can route to it transparently.
+    * Scheduling and the publish queue
+    * Calendar view and rescheduling
+    * Media library
+    * Automations
+    * Team / roles
+    * Advanced analytics (per-channel, daily charts)
+
+These raise `LocalError` with a clear Persian message. `api.py` catches
+it and turns it into an `ApiError`, so `main.py` never needs to know
+which backend answered the call.
+
+`LocalBackend.handle()` speaks the same `(method, path, body)` shape as
+the real HTTP client. This keeps the two backends interchangeable.
 """
 
 from __future__ import annotations
@@ -23,29 +38,38 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-import uuid
 from typing import Any
 
 import httpx
 
-# --------------------------------------------------------------------- constants
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+import config
+
+
+# ================================================================ constants ==
+
 EITAAYAR_BASE = "https://eitaayar.ir/api"
-REQUEST_TIMEOUT = 30.0
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+# Storage keys are prefixed so they never collide with the app's own keys
+# (theme, server, token, intro_done, ...).
+_STORE_PREFIX = "local:"
 
 
 class LocalError(Exception):
-    """Raised when an operation cannot be performed in local mode."""
+    """Raised when an operation cannot be done in local mode.
+
+    The message is user-facing and already in Persian.
+    """
 
 
-# --------------------------------------------------------------- AI prompt table
-# Mirrors backend/ai.py — kept here so the client can work without a server.
+# =========================================================== AI prompt table ==
+
 AI_SYSTEM = (
     "تو دستیار تولید محتوا برای کانال‌های ایتا هستی. "
     "فقط متن نهایی را به فارسی روان بنویس، بدون توضیح اضافه."
 )
-AI_ACTIONS = {
+
+AI_ACTIONS: dict[str, str] = {
     "create": "از اطلاعات زیر یک پست مناسب کانال بساز:",
     "rewrite": "متن زیر را بازنویسی کن:",
     "shorter": "متن زیر را کوتاه‌تر کن و نکات اصلی را نگه دار:",
@@ -62,11 +86,14 @@ AI_ACTIONS = {
     "proofread": "غلط‌های نگارشی و املایی متن زیر را اصلاح کن و معنا را تغییر نده:",
 }
 
-# --------------------------------------------------------------- channel utils
+
+# ============================================================ channel utils ==
+
 _CHANNEL_RE = re.compile(r"^(?:https?://)?(?:www\.)?eitaa\.com/([A-Za-z0-9_]+)/?$")
 
 
 def normalize_channel(raw: str) -> str:
+    """Convert an eitaa.com link or @username to a bare chat id."""
     raw = (raw or "").strip()
     m = _CHANNEL_RE.match(raw)
     if m:
@@ -74,13 +101,15 @@ def normalize_channel(raw: str) -> str:
     return raw.lstrip("@")
 
 
-# =============================================================== LocalBackend ==
-class LocalBackend:
-    """A tiny offline backend backed by client_storage."""
+# ============================================================== LocalBackend ==
 
-    # ------------------------------------------------------------------ init
+class LocalBackend:
+    """A tiny offline backend backed by the device's client storage."""
+
+    # ---------------------------------------------------------------- init --
     def __init__(self, storage):
-        # `storage` is the same Store wrapper App uses (page.client_storage).
+        # `storage` is the Store wrapper App passes around; it forwards to
+        # page.client_storage and exposes async get/set/remove.
         self.storage = storage
         self.me = {
             "id": 0,
@@ -89,187 +118,240 @@ class LocalBackend:
             "role": "owner",
         }
 
-    # ---------------------------------------------------------- storage helpers
+    # ----------------------------------------------------------- secrets ----
+    def credentials_present(self) -> bool:
+        """Return True when the hard-coded test credentials are usable."""
+        return bool(config.EITAA_TOKEN and config.GROQ_API_KEY)
+
+    # ------------------------------------------------------ storage helpers -
     async def _get(self, key: str, default=None):
-        raw = await self.storage.get("local:" + key)
-        if raw is None:
+        raw = await self.storage.get(_STORE_PREFIX + key)
+        if raw is None or raw == "":
             return default
         try:
             return json.loads(raw)
-        except Exception:
+        except (TypeError, ValueError):
             return default
 
-    async def _set(self, key: str, value):
+    async def _set(self, key: str, value) -> None:
         await self.storage.set(
-            "local:" + key,
+            _STORE_PREFIX + key,
             json.dumps(value, ensure_ascii=False, default=str),
         )
 
-    async def _append_activity(self, kind: str, message: str):
-        log = await self._get("activity", [])
+    # ----------------------------------------------------- activity logging --
+    async def _log(self, kind: str, message: str) -> None:
+        log = await self._get("activity", []) or []
         log.insert(0, {
             "at": dt.datetime.utcnow().isoformat(timespec="seconds"),
             "kind": kind,
             "message": message,
         })
-        await self._set("activity", log[:50])
+        await self._set("activity", log[:60])
 
-    # ------------------------------------------------------------ credentials
-    async def get_eitaa_token(self) -> str:
-        return (await self.storage.get("local:eitaa_token")) or ""
+    # ------------------------------------------------------------- secrets --
+    async def token(self) -> str:
+        """Return the EitaaYar token currently in use."""
+        return await self.storage.get(_STORE_PREFIX + "eitaa_token") or ""
 
-    async def set_eitaa_token(self, token: str):
-        await self.storage.set("local:eitaa_token", (token or "").strip())
+    async def groq_key(self) -> str:
+        """Return the Groq API key currently in use."""
+        return await self.storage.get(_STORE_PREFIX + "groq_key") or ""
 
-    async def get_groq_key(self) -> str:
-        return (await self.storage.get("local:groq_key")) or ""
+    async def forget_credentials(self) -> None:
+        """Forget cached credentials (forces re-provisioning on next boot)."""
+        await self.storage.remove(_STORE_PREFIX + "eitaa_token")
+        await self.storage.remove(_STORE_PREFIX + "groq_key")
 
-    async def set_groq_key(self, key: str):
-        await self.storage.set("local:groq_key", (key or "").strip())
+    # ---------------------------------------------------- first-run setup ---
+    async def ensure_provisioned(self) -> None:
+        """On first run, install the test credentials and the default channel.
 
-    # ================================================================ dispatcher
-    async def handle(self, method: str, path: str, body: Any = None, files: dict | None = None):
-        """Route a (method, path) pair to a local handler.
-
-        Raises `LocalError` for endpoints that make no sense without a server;
-        `api.py` catches that and turns it into a friendly ApiError message.
+        Idempotent — safe to call on every boot.
         """
-        # ------------------------------------------------------------- auth
+        if not self.credentials_present():
+            return
+
+        # --- credentials ---
+        if not await self.token():
+            await self.storage.set(_STORE_PREFIX + "eitaa_token",
+                                   config.EITAA_TOKEN)
+        if not await self.groq_key():
+            await self.storage.set(_STORE_PREFIX + "groq_key",
+                                   config.GROQ_API_KEY)
+
+        # --- default channel ---
+        chans = await self._get("channels", []) or []
+        if not chans and config.DEFAULT_CHANNEL_ID:
+            cid = normalize_channel(config.DEFAULT_CHANNEL_ID)
+            chans = [{"id": 1, "title": cid, "chat_id": cid}]
+            await self._set("channels", chans)
+            await self._log("channel", f"کانال پیش‌فرض {cid} اضافه شد")
+
+        # --- default connection record (for UI display) ---
+        conns = await self._get("connections", []) or []
+        if not conns:
+            conns = [{"id": 1, "name": "اتصال اصلی", "bot": "ربات ایتایار"}]
+            await self._set("connections", conns)
+
+        # --- default templates (only once) ---
+        if await self._get("templates") is None:
+            await self._set("templates", _DEFAULT_TEMPLATES.copy())
+
+    # ============================================================ dispatcher =
+    async def handle(self, method: str, path: str, body: Any = None,
+                     files: dict | None = None) -> Any:
+        """Route a `(method, path)` call the same way the HTTP client would.
+
+        Raises `LocalError` for anything the local mode cannot do; the
+        caller (`api.py`) turns it into an `ApiError` with the message.
+        """
+        path = path.split("?", 1)[0]  # strip query string; handled per-route
+
+        # ---------------------------------------------------------- auth ---
         if path == "/auth/state":
             return {"has_users": True, "local": True}
         if path == "/auth/me":
             return self.me
         if path.startswith("/auth/"):
-            raise LocalError("ورود و ثبت‌نام در حالت محلی لازم نیست؛ وارد شده‌ای.")
+            raise LocalError("در حالت محلی نیازی به ورود نیست.")
 
-        # ------------------------------------------------------- connections
-        if path == "/connections" and method == "GET":
-            return await self._get("connections", [])
-        if path == "/connections" and method == "POST":
-            return await self._add_connection(body or {})
+        # --------------------------------------------------- connections ---
+        if path == "/connections":
+            if method == "GET":
+                return await self._get("connections", []) or []
+            if method == "POST":
+                # In local mode the token is provisioned from config, not
+                # from user input. Accept the call and confirm the bot.
+                return await self._confirm_connection(body or {})
 
-        # ---------------------------------------------------------- channels
-        if path == "/channels" and method == "GET":
-            return await self._get("channels", [])
-        if path == "/channels" and method == "POST":
-            return await self._add_channel(body or {})
+        # ------------------------------------------------------ channels ---
+        if path == "/channels":
+            if method == "GET":
+                return await self._get("channels", []) or []
+            if method == "POST":
+                return await self._add_channel(body or {})
 
-        # ------------------------------------------------------------- posts
-        if path == "/posts" and method == "GET":
-            return await self._get("posts", [])
-        if path == "/posts" and method == "POST":
-            return await self._create_post(body or {})
+        # --------------------------------------------------------- posts ---
+        if path == "/posts":
+            if method == "GET":
+                return await self._get("posts", []) or []
+            if method == "POST":
+                return await self._create_post(body or {})
+
         m = re.match(r"^/posts/(\d+)/cancel$", path)
         if m and method == "POST":
             return await self._cancel_post(int(m.group(1)))
+
         if re.match(r"^/posts/\d+/(approve|reject|reschedule)$", path):
             raise LocalError("تأیید، رد و زمان‌بندی پست فقط با سرور امکان‌پذیر است.")
         if re.match(r"^/deliveries/\d+/retry$", path):
             raise LocalError("تلاش دوباره فقط با سرور امکان‌پذیر است.")
 
-        # --------------------------------------------------------- templates
-        if path == "/templates" and method == "GET":
-            return await self._get("templates", [])
-        if path == "/templates" and method == "POST":
-            return await self._add_template(body or {})
+        # ----------------------------------------------------- templates ---
+        if path == "/templates":
+            if method == "GET":
+                return await self._get("templates", []) or []
+            if method == "POST":
+                return await self._add_template(body or {})
+
         m = re.match(r"^/templates/(\d+)$", path)
         if m and method == "DELETE":
             return await self._delete_template(int(m.group(1)))
 
-        # ------------------------------------------------------------- stats
+        # --------------------------------------------------------- stats ---
         if path == "/stats":
             return await self._stats()
         if path == "/activity":
-            return await self._get("activity", [])
+            return await self._get("activity", []) or []
         if path.startswith("/analytics"):
-            raise LocalError("صفحه‌ی آمار فقط با سرور در دسترس است.")
+            raise LocalError("صفحه‌ی آمار کامل فقط با سرور در دسترس است.")
 
-        # ---------------------------------------------------------------- AI
+        # ------------------------------------------------------------ AI ---
         if path == "/ai" and method == "POST":
             return await self._ai(body or {})
 
-        # ------------------------------------------------------------- media
+        # --------------------------------------------------------- media ---
         if path.startswith("/media"):
             raise LocalError("کتابخانه رسانه فقط با سرور در دسترس است.")
 
-        # ------------------------------------------------ team / automation
+        # -------------------------------------------- team / automations ---
         if path.startswith("/team"):
             raise LocalError("مدیریت تیم فقط با سرور در دسترس است.")
         if path.startswith("/automations"):
             raise LocalError("اتوماسیون فقط با سرور در دسترس است.")
 
-        # --------------------------------------------------------- fallback
+        # -------------------------------------------------------- unknown --
         raise LocalError("این قابلیت در حالت محلی پشتیبانی نمی‌شود.")
 
-    # ================================================================ handlers
-
-    # ------------------------------------------------------- connections ------
-    async def _add_connection(self, body: dict):
-        token = (body.get("token") or "").strip()
+    # ============================================================ handlers ==
+    # ------------------------------------------------------ connections ----
+    async def _confirm_connection(self, body: dict) -> dict:
+        """Validate the config-provided token against EitaaYar and store it."""
+        token = await self.token()
         if not token:
-            raise LocalError("توکن ایتایار خالی است.")
+            raise LocalError("توکن ایتایار در برنامه تنظیم نشده است.")
+
+        bot_name = "ربات ایتایار"
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as c:
+            async with httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT) as c:
                 r = await c.post(f"{EITAAYAR_BASE}/{token}/getMe")
             data = r.json()
         except (httpx.HTTPError, ValueError):
             raise LocalError("ارتباط با ایتایار برقرار نشد. اینترنت را بررسی کن.")
+
         if r.status_code != 200 or not data.get("ok", True):
             raise LocalError("توکن ایتایار معتبر نیست.")
 
-        await self.set_eitaa_token(token)
-        conns = await self._get("connections", [])
-        bot_name = str(data.get("result", {}).get("first_name", "ربات"))
-        conn = {"id": 1, "name": body.get("name", "اتصال محلی"), "bot": bot_name}
-        if not conns:
-            conns = [conn]
-        else:
-            conns[0] = conn
-        await self._set("connections", conns)
-        await self._append_activity("connect", "اتصال ایتایار برقرار شد")
-        return conn
+        result = data.get("result") or {}
+        bot_name = str(result.get("first_name") or result.get("username") or bot_name)
 
-    # ---------------------------------------------------------- channels ------
-    async def _add_channel(self, body: dict):
+        conns = [{"id": 1, "name": body.get("name", "اتصال اصلی"), "bot": bot_name}]
+        await self._set("connections", conns)
+        await self._log("connect", "اتصال ایتایار برقرار شد")
+        return conns[0]
+
+    # --------------------------------------------------------- channels ----
+    async def _add_channel(self, body: dict) -> dict:
         raw = body.get("value") or ""
         cid = normalize_channel(raw)
         if not cid:
             raise LocalError("شناسه کانال معتبر نیست.")
 
-        conns = await self._get("connections", [])
-        if not conns:
-            raise LocalError("ابتدا توکن ایتایار را در تنظیمات وارد کن.")
-
-        chans = await self._get("channels", [])
-        if any(c["chat_id"] == cid for c in chans):
+        chans = await self._get("channels", []) or []
+        if any(c.get("chat_id") == cid for c in chans):
             raise LocalError("این کانال قبلاً اضافه شده است.")
 
-        new_id = (max((c["id"] for c in chans), default=0) + 1)
+        new_id = max((c.get("id", 0) for c in chans), default=0) + 1
         ch = {
             "id": new_id,
-            "title": body.get("title") or cid,
+            "title": (body.get("title") or cid).strip() or cid,
             "chat_id": cid,
         }
         chans.append(ch)
         await self._set("channels", chans)
-        await self._append_activity("channel", f"کانال {ch['title']} اضافه شد")
+        await self._log("channel", f"کانال {ch['title']} اضافه شد")
         return ch
 
-    # ------------------------------------------------------------- posts ------
-    async def _create_post(self, body: dict):
+    # ------------------------------------------------------------ posts ----
+    async def _create_post(self, body: dict) -> dict:
         text = (body.get("text") or "").strip()
         if not text:
             raise LocalError("متن پست خالی است.")
 
         mode = body.get("mode", "draft")
-        channel_ids = body.get("channel_ids") or []
+        channel_ids = list(body.get("channel_ids") or [])
+
+        if mode == "schedule":
+            raise LocalError(
+                "زمان‌بندی بدون سرور ممکن نیست؛ از «ارسال فوری» استفاده کن."
+            )
         if mode != "draft" and not channel_ids:
             raise LocalError("حداقل یک کانال انتخاب کن.")
-        if mode == "schedule":
-            raise LocalError("زمان‌بندی بدون سرور ممکن نیست. از «ارسال فوری» استفاده کن.")
 
-        posts = await self._get("posts", [])
-        new_id = (max((p["id"] for p in posts), default=0) + 1)
+        posts = await self._get("posts", []) or []
+        new_id = max((p.get("id", 0) for p in posts), default=0) + 1
+
         post = {
             "id": new_id,
             "title": (body.get("title") or "").strip(),
@@ -281,9 +363,12 @@ class LocalBackend:
             "view_to_delete": body.get("view_to_delete"),
             "media_id": None,
             "deliveries": [
-                {"id": new_id * 1000 + i, "channel_id": cid,
-                 "status": "draft" if mode == "draft" else "queued",
-                 "error": ""}
+                {
+                    "id": new_id * 1000 + i,
+                    "channel_id": cid,
+                    "status": "draft" if mode == "draft" else "queued",
+                    "error": "",
+                }
                 for i, cid in enumerate(channel_ids)
             ],
         }
@@ -292,16 +377,16 @@ class LocalBackend:
             await self._send_post_now(post)
 
         posts.insert(0, post)
-        await self._set("posts", posts)
-        await self._append_activity(
+        await self._set("posts", posts[:200])
+        await self._log(
             "post",
             f"پست «{post['title'] or post['id']}» "
-            f"{'ذخیره شد' if mode == 'draft' else 'ارسال شد'}"
+            + ("ذخیره شد" if mode == "draft" else "ارسال شد"),
         )
         return {"id": new_id, "status": post["status"]}
 
-    async def _send_post_now(self, post: dict):
-        token = await self.get_eitaa_token()
+    async def _send_post_now(self, post: dict) -> None:
+        token = await self.token()
         if not token:
             post["status"] = "failed"
             for d in post["deliveries"]:
@@ -309,8 +394,9 @@ class LocalBackend:
                 d["error"] = "توکن ایتایار تنظیم نشده است."
             return
 
-        chans = {c["id"]: c for c in await self._get("channels", [])}
+        chans = {c["id"]: c for c in (await self._get("channels", []) or [])}
         any_ok = False
+
         async with httpx.AsyncClient(timeout=60) as c:
             for d in post["deliveries"]:
                 ch = chans.get(d["channel_id"])
@@ -318,67 +404,75 @@ class LocalBackend:
                     d["status"] = "failed"
                     d["error"] = "کانال پیدا نشد."
                     continue
-                try:
-                    payload = {
-                        "chat_id": ch["chat_id"],
-                        "text": post["text"],
-                    }
-                    if post["title"]:
-                        payload["title"] = post["title"]
-                    if post["silent"]:
-                        payload["disable_notification"] = 1
-                    if post["pin"]:
-                        payload["pin"] = 1
-                    if post["view_to_delete"]:
-                        payload["view_to_delete"] = post["view_to_delete"]
 
-                    r = await c.post(f"{EITAAYAR_BASE}/{token}/sendMessage", data=payload)
+                payload: dict[str, Any] = {
+                    "chat_id": ch["chat_id"],
+                    "text": post["text"],
+                }
+                if post["title"]:
+                    payload["title"] = post["title"]
+                if post["silent"]:
+                    payload["disable_notification"] = 1
+                if post["pin"]:
+                    payload["pin"] = 1
+                if post["view_to_delete"]:
+                    payload["view_to_delete"] = post["view_to_delete"]
+
+                try:
+                    r = await c.post(f"{EITAAYAR_BASE}/{token}/sendMessage",
+                                     data=payload)
                     j = r.json()
-                    if r.status_code == 200 and j.get("ok", True):
-                        d["status"] = "published"
-                        any_ok = True
-                    else:
-                        d["status"] = "failed"
-                        d["error"] = str(
-                            j.get("description") or j.get("message") or "خطای ایتایار"
-                        )
                 except (httpx.HTTPError, ValueError) as e:
                     d["status"] = "failed"
                     d["error"] = f"ارتباط برقرار نشد ({type(e).__name__})"
+                    continue
 
-        if all(d["status"] == "published" for d in post["deliveries"]):
+                if r.status_code == 200 and j.get("ok", True):
+                    d["status"] = "published"
+                    any_ok = True
+                else:
+                    d["status"] = "failed"
+                    d["error"] = str(
+                        j.get("description")
+                        or j.get("message")
+                        or "خطای نامشخص از ایتایار"
+                    )
+
+        all_ok = all(d["status"] == "published" for d in post["deliveries"])
+        if all_ok:
             post["status"] = "published"
         elif any_ok:
             post["status"] = "published"  # partial success treated as published
         else:
             post["status"] = "failed"
 
-        await self._append_activity(
+        await self._log(
             "publish" if post["status"] == "published" else "error",
-            f"«{post['title'] or post['id']}»: {post['status']}"
+            f"«{post['title'] or post['id']}» → {post['status']}",
         )
 
-    async def _cancel_post(self, pid: int):
-        posts = await self._get("posts", [])
+    async def _cancel_post(self, pid: int) -> dict:
+        posts = await self._get("posts", []) or []
         for p in posts:
-            if p["id"] == pid:
+            if p.get("id") == pid:
                 p["status"] = "cancelled"
-                for d in p["deliveries"]:
-                    if d["status"] == "queued":
+                for d in p.get("deliveries", []):
+                    if d.get("status") == "queued":
                         d["status"] = "cancelled"
                 break
         await self._set("posts", posts)
-        await self._append_activity("cancel", f"پست {pid} لغو شد")
+        await self._log("cancel", f"پست {pid} لغو شد")
         return {"ok": True}
 
-    # --------------------------------------------------------- templates ------
-    async def _add_template(self, body: dict):
+    # -------------------------------------------------------- templates ----
+    async def _add_template(self, body: dict) -> dict:
         name = (body.get("name") or "").strip()
         text = (body.get("body") or "").strip()
         if not name or not text:
             raise LocalError("نام و متن قالب الزامی است.")
-        tpls = await self._get("templates", [])
-        new_id = (max((t["id"] for t in tpls), default=0) + 1)
+
+        tpls = await self._get("templates", []) or []
+        new_id = max((t.get("id", 0) for t in tpls), default=0) + 1
         tpls.append({
             "id": new_id,
             "name": name,
@@ -389,31 +483,30 @@ class LocalBackend:
         await self._set("templates", tpls)
         return {"id": new_id}
 
-    async def _delete_template(self, tid: int):
-        tpls = await self._get("templates", [])
-        tpls = [t for t in tpls if t["id"] != tid]
+    async def _delete_template(self, tid: int) -> dict:
+        tpls = await self._get("templates", []) or []
+        tpls = [t for t in tpls if t.get("id") != tid]
         await self._set("templates", tpls)
         return {"ok": True}
 
-    # --------------------------------------------------------------- stats ----
-    async def _stats(self):
-        posts = await self._get("posts", [])
-        c = lambda *st: sum(1 for p in posts if p["status"] in st)
+    # ------------------------------------------------------------ stats ----
+    async def _stats(self) -> dict:
+        posts = await self._get("posts", []) or []
+        count = lambda *st: sum(1 for p in posts if p.get("status") in st)
+        ai_usage = await self._get("ai_usage", []) or []
         return {
-            "published": c("published"),
-            "failed": c("failed"),
+            "published": count("published"),
+            "failed": count("failed"),
             "scheduled": 0,
-            "queued": c("queued"),
-            "ai_calls": len(await self._get("ai_usage", [])),
+            "queued": count("queued"),
+            "ai_calls": len(ai_usage),
         }
 
-    # ------------------------------------------------------------------- AI ---
-    async def _ai(self, body: dict):
-        key = await self.get_groq_key()
+    # --------------------------------------------------------------- AI ----
+    async def _ai(self, body: dict) -> dict:
+        key = await self.groq_key()
         if not key:
-            raise LocalError(
-                "کلید Groq تنظیم نشده است. از تنظیمات، کلید خودت را وارد کن."
-            )
+            raise LocalError("کلید Groq تنظیم نشده است.")
 
         action = body.get("action") or ""
         text = body.get("text") or ""
@@ -436,7 +529,7 @@ class LocalBackend:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": GROQ_MODEL,
+                        "model": config.GROQ_MODEL,
                         "messages": [
                             {"role": "system", "content": AI_SYSTEM},
                             {"role": "user", "content": user_msg},
@@ -447,12 +540,12 @@ class LocalBackend:
                 )
             data = r.json()
         except (httpx.HTTPError, ValueError):
-            raise LocalError("ارتباط با Groq برقرار نشد. اینترنت را بررسی کن.")
+            raise LocalError("ارتباط با سرویس هوش مصنوعی برقرار نشد.")
 
         if r.status_code != 200:
-            msg = "سرویس Groq خطا داد."
+            msg = "سرویس هوش مصنوعی خطا داد."
             try:
-                err = data.get("error", {}).get("message")
+                err = (data.get("error") or {}).get("message")
                 if err:
                     msg += " " + str(err)
             except Exception:
@@ -461,10 +554,10 @@ class LocalBackend:
 
         try:
             out = data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, AttributeError):
-            raise LocalError("پاسخ Groq نامعتبر بود.")
+        except (KeyError, IndexError, AttributeError, TypeError):
+            raise LocalError("پاسخ سرویس هوش مصنوعی نامعتبر بود.")
 
-        usage = await self._get("ai_usage", [])
+        usage = await self._get("ai_usage", []) or []
         usage.append({
             "at": dt.datetime.utcnow().isoformat(timespec="seconds"),
             "action": action,
@@ -473,3 +566,33 @@ class LocalBackend:
         })
         await self._set("ai_usage", usage[-200:])
         return {"text": out}
+
+
+# ============================================================ default data ==
+
+_DEFAULT_TEMPLATES = [
+    {"id": 1, "name": "خبر فوری", "category": "خبر",
+     "body": "🔴 فوری | {{title}}\n\n{{summary}}\n\n{{link}}\n{{hashtags}}",
+     "builtin": True},
+    {"id": 2, "name": "خبر", "category": "خبر",
+     "body": "📰 {{title}}\n\n{{summary}}\n\n📅 {{date}}\n{{link}}\n{{hashtags}}",
+     "builtin": True},
+    {"id": 3, "name": "معرفی محصول", "category": "معرفی",
+     "body": "✨ {{title}}\n\n{{summary}}\n\n🔗 {{link}}\n{{hashtags}}",
+     "builtin": True},
+    {"id": 4, "name": "معرفی اپلیکیشن", "category": "معرفی",
+     "body": "📱 {{title}}\n\n{{summary}}\n\n⬇️ دانلود: {{link}}\n{{hashtags}}",
+     "builtin": True},
+    {"id": 5, "name": "آموزشی", "category": "آموزشی",
+     "body": "💡 {{title}}\n\n{{summary}}\n\n{{hashtags}}",
+     "builtin": True},
+    {"id": 6, "name": "اطلاعیه", "category": "اطلاعیه",
+     "body": "📢 اطلاعیه\n\n{{title}}\n{{summary}}\n\n📅 {{date}}",
+     "builtin": True},
+    {"id": 7, "name": "تبلیغ", "category": "تبلیغ",
+     "body": "🔥 {{title}}\n\n{{summary}}\n\n👉 {{link}}\n{{hashtags}}",
+     "builtin": True},
+    {"id": 8, "name": "معرفی بازی", "category": "معرفی",
+     "body": "🎮 {{title}}\n\n{{summary}}\n\n⬇️ {{link}}\n{{hashtags}}",
+     "builtin": True},
+]
