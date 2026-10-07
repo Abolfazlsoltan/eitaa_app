@@ -30,23 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
 from . import ai, analytics, auth, eitaa
-from .db import (
-    ActivityLog,
-    AIUsage,
-    Automation,
-    Channel,
-    Connection,
-    Delivery,
-    MediaAsset,
-    Post,
-    Session,
-    Template,
-    User,
-    Workspace,
-    fernet,
-    init,
-    now,
-)
+from .db import *
 
 # ================================================================ constants ==
 
