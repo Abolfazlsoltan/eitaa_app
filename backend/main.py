@@ -1,17 +1,11 @@
-"""FastAPI backend for the Eitaa Channel Manager.
+"""FastAPI backend for the Eitaa Manager.
 
-Runs as a package (`backend`) with relative imports. Start with:
+The client app works standalone on the device. This backend is optional
+and becomes useful when you want to sync data across multiple devices,
+run the scheduler 24/7, or manage a team.
 
+Start with:
     uvicorn backend.main:app --reload --port 8000
-
-or from inside the package directory:
-
-    cd backend
-    uvicorn main:app --reload --port 8000
-
-The client (`src/main.py`) may run either against this server (server mode)
-or entirely on-device (local mode). In local mode this file is not used at
-all; see `src/local.py` for the offline implementation.
 """
 
 from __future__ import annotations
@@ -30,61 +24,68 @@ from pydantic import BaseModel
 from sqlalchemy import func, select, update
 
 from . import ai, analytics, auth, eitaa
-from .db import *
+from .db import (
+    ActivityLog,
+    AIUsage,
+    Automation,
+    Channel,
+    Connection,
+    Delivery,
+    MediaAsset,
+    Post,
+    Session,
+    Template,
+    User,
+    Workspace,
+    fernet,
+    init,
+    now,
+)
 
-# ================================================================ constants ==
+
+# ================================================================ constants
 
 MAX_ATTEMPTS = 5
 MAX_UPLOAD = 20 * 1024 * 1024  # 20 MB
 MEDIA_DIR = os.getenv("MEDIA_DIR", "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
-# Iran Standard Time offset from UTC (minutes). Configurable for tests.
+# Iran Standard Time offset from UTC (minutes). Overridable per deployment.
 TZ = dt.timedelta(minutes=int(os.getenv("TZ_OFFSET_MIN", "210")))
 
 
-# ================================================================== helpers ==
+# ================================================================== helpers
 
 def log(s, kind: str, message: str) -> None:
-    """Append an entry to the activity log inside an open session."""
     s.add(ActivityLog(kind=kind, message=message))
 
 
 def _bot_name(get_me_response) -> str:
-    """Extract a display name from an EitaaYar `getMe` response."""
     result = (get_me_response or {}).get("result") or {}
     return str(
         result.get("first_name")
         or result.get("username")
         or result.get("title")
-        or "ربات"
+        or "ربات ایتا"
     )
 
 
-# =================================================================== worker ==
+# =================================================================== worker
 
 async def worker() -> None:
-    """Background loop: promote due deliveries, deliver them, run automations."""
+    """Background loop: promote due deliveries, publish them, run automations."""
     while True:
         try:
             with Session() as s:
-                # Promote scheduled → queued for anything due.
-                sched = s.scalars(
-                    select(Delivery).where(
-                        Delivery.status == "scheduled",
-                        Delivery.run_at <= now(),
-                    )
-                ).all()
-                for d in sched:
+                for d in s.scalars(select(Delivery).where(
+                    Delivery.status == "scheduled",
+                    Delivery.run_at <= now(),
+                )).all():
                     d.status = "queued"
 
-                # Collect a batch of queued deliveries.
                 due_ids = s.scalars(
                     select(Delivery.id)
-                    .where(
-                        Delivery.status == "queued",
-                        Delivery.run_at <= now(),
-                    )
+                    .where(Delivery.status == "queued", Delivery.run_at <= now())
                     .limit(20)
                 ).all()
                 s.commit()
@@ -93,13 +94,13 @@ async def worker() -> None:
                 await deliver(did)
 
             await run_automations()
-        except Exception as e:  # never let the worker die
+        except Exception as e:
             print("worker error:", type(e).__name__, e)
         await asyncio.sleep(5)
 
 
 async def deliver(delivery_id: int) -> None:
-    """Deliver a single queued delivery. Atomic claim prevents double sends."""
+    """Publish a single queued delivery. Atomic claim prevents double sends."""
     with Session() as s:
         claimed = s.execute(
             update(Delivery)
@@ -113,32 +114,22 @@ async def deliver(delivery_id: int) -> None:
         d = s.get(Delivery, delivery_id)
         p = s.get(Post, d.post_id)
         ch = s.get(Channel, d.channel_id)
-        conn = s.get(Connection, ch.connection_id)
-        token = fernet.decrypt(conn.token_enc.encode()).decode()
+        token = fernet.decrypt(
+            s.get(Connection, ch.connection_id).token_enc.encode()
+        ).decode()
 
         try:
             m = s.get(MediaAsset, p.media_id) if p.media_id else None
             if m:
                 await eitaa.send_file(
-                    token,
-                    ch.chat_id,
-                    os.path.join(MEDIA_DIR, m.stored_name),
-                    m.filename,
-                    p.text,
-                    p.title,
-                    p.silent,
-                    p.pin,
-                    p.view_to_delete,
+                    token, ch.chat_id,
+                    os.path.join(MEDIA_DIR, m.stored_name), m.filename,
+                    p.text, p.title, p.silent, p.pin, p.view_to_delete,
                 )
             else:
                 await eitaa.send_message(
-                    token,
-                    ch.chat_id,
-                    p.text,
-                    p.title,
-                    p.silent,
-                    p.pin,
-                    p.view_to_delete,
+                    token, ch.chat_id, p.text, p.title,
+                    p.silent, p.pin, p.view_to_delete,
                 )
             d.status, d.error, d.done_at = "published", "", now()
             log(s, "publish", f"«{p.title or p.id}» در {ch.title} منتشر شد")
@@ -158,7 +149,6 @@ async def deliver(delivery_id: int) -> None:
 
 
 def _refresh_post(s, post_id: int) -> None:
-    """Recompute the post's aggregate status from its deliveries."""
     p = s.get(Post, post_id)
     statuses = {
         d.status
@@ -179,7 +169,7 @@ def _refresh_post(s, post_id: int) -> None:
         p.status = "failed"
 
 
-# ============================================================ default data ==
+# ============================================================ default data
 
 DEFAULT_TEMPLATES = [
     ("خبر فوری", "🔴 فوری | {{title}}\n\n{{summary}}\n\n{{link}}\n{{hashtags}}"),
@@ -202,7 +192,7 @@ def seed_templates() -> None:
         s.commit()
 
 
-# ================================================================= lifespan ==
+# ================================================================= lifespan
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -219,10 +209,10 @@ async def lifespan(_app: FastAPI):
             pass
 
 
-app = FastAPI(title="Eitaa Channel Manager", lifespan=lifespan)
+app = FastAPI(title="Eitaa Manager", lifespan=lifespan)
 
 
-# ================================================================ schemas ==
+# ================================================================= schemas
 
 class ConnIn(BaseModel):
     name: str = "اتصال اصلی"
@@ -239,13 +229,13 @@ class PostIn(BaseModel):
     title: str = ""
     text: str
     channel_ids: list[int] = []
-    mode: str = "draft"  # draft | now | schedule
+    mode: str = "draft"
     scheduled_at: dt.datetime | None = None
     silent: bool = False
     pin: bool = False
     view_to_delete: int | None = None
     media_id: int | None = None
-    repeat: str = "none"  # none | daily | weekly
+    repeat: str = "none"
     repeat_count: int = 1
 
 
@@ -271,7 +261,7 @@ class TagsIn(BaseModel):
 
 class AutoIn(BaseModel):
     name: str
-    trigger: str = "daily"  # daily | weekly | interval
+    trigger: str = "daily"
     at_time: str = "09:00"
     weekdays: list[int] = []
     interval_min: int = 60
@@ -294,10 +284,6 @@ class LoginIn(BaseModel):
     password: str
 
 
-class EitaaIn(BaseModel):
-    init_data: str
-
-
 class MemberIn(BaseModel):
     username: str
     password: str
@@ -306,7 +292,7 @@ class MemberIn(BaseModel):
     eitaa_id: str | None = None
 
 
-# ============================================================= connections ==
+# ============================================================= connections
 
 @app.post("/api/connections")
 async def add_conn(b: ConnIn):
@@ -314,7 +300,6 @@ async def add_conn(b: ConnIn):
         me = await eitaa.get_me(b.token.strip())
     except eitaa.EitaaError as e:
         raise HTTPException(400, str(e))
-
     with Session() as s:
         c = Connection(
             name=b.name,
@@ -322,9 +307,8 @@ async def add_conn(b: ConnIn):
             bot_name=_bot_name(me),
         )
         s.add(c)
-        log(s, "connect", "اتصال ایتایار برقرار شد")
+        log(s, "connect", "اتصال ایتا برقرار شد")
         s.commit()
-        # Token is never returned to the client.
         return {"id": c.id, "name": c.name, "bot": c.bot_name}
 
 
@@ -337,7 +321,7 @@ def conns():
         ]
 
 
-# ================================================================ channels ==
+# ================================================================ channels
 
 @app.post("/api/channels")
 def add_channel(b: ChanIn):
@@ -364,7 +348,7 @@ def channels():
         ]
 
 
-# =================================================================== posts ==
+# =================================================================== posts
 
 def _create_post(b: PostIn) -> dict:
     if not b.text.strip():
@@ -393,10 +377,8 @@ def _create_post(b: PostIn) -> dict:
             at = b.scheduled_at if b.mode == "schedule" else now()
             for cid in b.channel_ids:
                 s.add(Delivery(
-                    post_id=p.id,
-                    channel_id=cid,
-                    idem_key=f"{p.id}:{cid}",
-                    run_at=at,
+                    post_id=p.id, channel_id=cid,
+                    idem_key=f"{p.id}:{cid}", run_at=at,
                     status="scheduled" if b.mode == "schedule" else "queued",
                 ))
 
@@ -407,15 +389,12 @@ def _create_post(b: PostIn) -> dict:
 
 @app.post("/api/posts")
 def create_post(b: PostIn, request: Request):
-    if not auth.can(
-        request.state.user.role,
-        "edit" if b.mode == "draft" else "publish",
-    ):
+    if not auth.can(request.state.user.role,
+                    "edit" if b.mode == "draft" else "publish"):
         raise HTTPException(403, "دسترسی لازم برای این عملیات را ندارید.")
 
     res = _create_post(b)
 
-    # Expand recurrence into independent scheduled posts.
     if b.mode == "schedule" and b.repeat in ("daily", "weekly") and b.scheduled_at:
         step = dt.timedelta(days=1 if b.repeat == "daily" else 7)
         for i in range(1, min(max(b.repeat_count, 1), 30)):
@@ -438,18 +417,11 @@ def posts(status: str | None = None):
                 select(Delivery).where(Delivery.post_id == p.id)
             ).all()
             out.append({
-                "id": p.id,
-                "title": p.title,
-                "text": p.text,
-                "status": p.status,
-                "scheduled_at": p.scheduled_at,
+                "id": p.id, "title": p.title, "text": p.text,
+                "status": p.status, "scheduled_at": p.scheduled_at,
                 "deliveries": [
-                    {
-                        "id": d.id,
-                        "channel_id": d.channel_id,
-                        "status": d.status,
-                        "error": d.error,
-                    }
+                    {"id": d.id, "channel_id": d.channel_id,
+                     "status": d.status, "error": d.error}
                     for d in ds
                 ],
             })
@@ -472,10 +444,8 @@ def cancel(pid: int):
     with Session() as s:
         s.execute(
             update(Delivery)
-            .where(
-                Delivery.post_id == pid,
-                Delivery.status.in_(["scheduled", "queued", "pending"]),
-            )
+            .where(Delivery.post_id == pid,
+                   Delivery.status.in_(["scheduled", "queued", "pending"]))
             .values(status="cancelled")
         )
         p = s.get(Post, pid)
@@ -486,12 +456,8 @@ def cancel(pid: int):
         return {"ok": True}
 
 
-class ReIn2(BaseModel):
-    scheduled_at: dt.datetime
-
-
 @app.post("/api/posts/{pid}/reschedule")
-def reschedule(pid: int, b: ReIn2):
+def reschedule(pid: int, b: ReIn):
     with Session() as s:
         p = s.get(Post, pid)
         if not p or p.status != "scheduled":
@@ -543,24 +509,21 @@ def reject(pid: int):
         return {"ok": True}
 
 
-# =================================================================== stats ==
+# =================================================================== stats
 
 @app.get("/api/stats")
 def stats():
     with Session() as s:
         c = lambda *st: s.scalar(
             select(func.count()).select_from(Delivery).where(
-                Delivery.status.in_(st)
-            )
+                Delivery.status.in_(st))
         ) or 0
         return {
             "published": c("published"),
             "failed": c("failed"),
             "scheduled": c("scheduled"),
             "queued": c("queued", "sending"),
-            "ai_calls": s.scalar(
-                select(func.count()).select_from(AIUsage)
-            ) or 0,
+            "ai_calls": s.scalar(select(func.count()).select_from(AIUsage)) or 0,
         }
 
 
@@ -570,14 +533,12 @@ def activity():
         return [
             {"at": a.at, "kind": a.kind, "message": a.message}
             for a in s.scalars(
-                select(ActivityLog)
-                .order_by(ActivityLog.id.desc())
-                .limit(30)
+                select(ActivityLog).order_by(ActivityLog.id.desc()).limit(30)
             )
         ]
 
 
-# ===================================================================== AI ==
+# ===================================================================== AI
 
 @app.post("/api/ai")
 async def run_ai(b: AIIn):
@@ -586,37 +547,27 @@ async def run_ai(b: AIIn):
         raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
     if not (b.text.strip() or b.prompt.strip()):
         raise HTTPException(400, "ابتدا متنی بنویسید.")
-
     try:
         out = await ai.get_provider().complete(
             ai.SYSTEM, f"{instruction}\n\n{b.text}"
         )
     except ai.AIError as e:
         raise HTTPException(502, str(e))
-
     with Session() as s:
-        s.add(AIUsage(
-            action=b.action,
-            chars_in=len(b.text),
-            chars_out=len(out),
-        ))
+        s.add(AIUsage(action=b.action,
+                      chars_in=len(b.text), chars_out=len(out)))
         s.commit()
     return {"text": out}
 
 
-# ================================================================ templates ==
+# ================================================================ templates
 
 @app.get("/api/templates")
 def templates():
     with Session() as s:
         return [
-            {
-                "id": t.id,
-                "name": t.name,
-                "category": t.category,
-                "body": t.body,
-                "builtin": t.builtin,
-            }
+            {"id": t.id, "name": t.name, "category": t.category,
+             "body": t.body, "builtin": t.builtin}
             for t in s.scalars(select(Template))
         ]
 
@@ -643,20 +594,15 @@ def del_template(tid: int):
         return {"ok": True}
 
 
-# ================================================================== media ==
+# ================================================================== media
 
 def _cat(mime: str) -> str:
     if mime.startswith("image/"):
         return "images"
     if mime.startswith("video/"):
         return "videos"
-    if (
-        mime.startswith("text/")
-        or "pdf" in mime
-        or "word" in mime
-        or "sheet" in mime
-        or "zip" in mime
-    ):
+    if (mime.startswith("text/") or "pdf" in mime or "word" in mime
+            or "sheet" in mime or "zip" in mime):
         return "files"
     return "other"
 
@@ -666,13 +612,9 @@ def _media_row(s, m: MediaAsset) -> dict:
         select(func.count()).select_from(Post).where(Post.media_id == m.id)
     ) or 0
     return {
-        "id": m.id,
-        "filename": m.filename,
-        "category": m.category,
-        "size": m.size,
-        "tags": [t for t in m.tags.split(",") if t],
-        "used": used,
-        "created_at": m.created_at,
+        "id": m.id, "filename": m.filename, "category": m.category,
+        "size": m.size, "tags": [t for t in m.tags.split(",") if t],
+        "used": used, "created_at": m.created_at,
     }
 
 
@@ -681,21 +623,16 @@ async def upload(file: UploadFile = File(...), tags: str = Form("")):
     data = await file.read()
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "حجم فایل بیش از ۲۰ مگابایت است.")
-
     name = os.path.basename(file.filename or "file")
     stored = uuid.uuid4().hex + os.path.splitext(name)[1][:10]
-
     with open(os.path.join(MEDIA_DIR, stored), "wb") as f:
         f.write(data)
-
     with Session() as s:
         m = MediaAsset(
-            filename=name,
-            stored_name=stored,
+            filename=name, stored_name=stored,
             mime=file.content_type or "",
             category=_cat(file.content_type or ""),
-            size=len(data),
-            tags=tags,
+            size=len(data), tags=tags,
         )
         s.add(m)
         log(s, "media", f"فایل {name} آپلود شد")
@@ -709,11 +646,8 @@ def media_list(q: str = "", category: str = ""):
         qs = select(MediaAsset).order_by(MediaAsset.id.desc())
         if category:
             qs = qs.where(MediaAsset.category == category)
-        return [
-            _media_row(s, m)
-            for m in s.scalars(qs)
-            if q.lower() in (m.filename + m.tags).lower()
-        ]
+        return [_media_row(s, m) for m in s.scalars(qs)
+                if q.lower() in (m.filename + m.tags).lower()]
 
 
 @app.get("/api/media/{mid}/file")
@@ -724,8 +658,7 @@ def media_file(mid: int):
             raise HTTPException(404, "فایل پیدا نشد.")
         return FileResponse(
             os.path.join(MEDIA_DIR, m.stored_name),
-            media_type=m.mime or None,
-            filename=m.filename,
+            media_type=m.mime or None, filename=m.filename,
         )
 
 
@@ -749,13 +682,10 @@ def media_delete(mid: int):
         busy = s.scalar(
             select(func.count()).select_from(Post).where(
                 Post.media_id == mid,
-                Post.status.in_(["scheduled", "queued", "sending"]),
-            )
+                Post.status.in_(["scheduled", "queued", "sending"]))
         )
         if busy:
-            raise HTTPException(
-                400, "این فایل در پست‌های در انتظار انتشار استفاده شده است."
-            )
+            raise HTTPException(400, "این فایل در پست‌های در انتظار انتشار استفاده شده است.")
         try:
             os.remove(os.path.join(MEDIA_DIR, m.stored_name))
         except OSError:
@@ -765,49 +695,39 @@ def media_delete(mid: int):
         return {"ok": True}
 
 
-# ============================================================== automations ==
+# ============================================================== automations
 
 def _due(a: Automation, local: dt.datetime) -> bool:
     last = a.last_run
     if a.trigger == "interval":
         return last is None or (
-            (now() - last).total_seconds() >= max(a.interval_min, 1) * 60
-        )
+            (now() - last).total_seconds() >= max(a.interval_min, 1) * 60)
     if a.trigger == "weekly":
         wd = set(x for x in a.weekdays.split(",") if x)
         if str(local.weekday()) not in wd:
             return False
-    # daily or weekly: fire once per local day at/after `at_time`
     already_today = last is not None and (last + TZ).date() == local.date()
     return local.strftime("%H:%M") >= a.at_time and not already_today
 
 
 async def _fire(s, a: Automation) -> None:
-    """Build a post from the automation and queue/pend it."""
     local = now() + TZ
     body = a.body
-
     if a.template_id:
         t = s.get(Template, a.template_id)
         if t:
             body = t.body
 
-    text = (
-        body.replace("{{title}}", a.name)
-            .replace("{{date}}", local.strftime("%Y-%m-%d"))
-    )
+    text = (body.replace("{{title}}", a.name)
+                .replace("{{date}}", local.strftime("%Y-%m-%d")))
     for v in ("summary", "link", "hashtags"):
         text = text.replace("{{" + v + "}}", "")
 
     if a.use_ai and a.ai_action in ai.ACTIONS:
         text = await ai.get_provider().complete(
-            ai.SYSTEM, ai.ACTIONS[a.ai_action] + "\n\n" + text
-        )
-        s.add(AIUsage(
-            action=a.ai_action,
-            chars_in=len(body),
-            chars_out=len(text),
-        ))
+            ai.SYSTEM, ai.ACTIONS[a.ai_action] + "\n\n" + text)
+        s.add(AIUsage(action=a.ai_action,
+                      chars_in=len(body), chars_out=len(text)))
 
     st = "pending" if a.require_approval else "queued"
     p = Post(title=a.name, text=text.strip(), status=st)
@@ -816,20 +736,15 @@ async def _fire(s, a: Automation) -> None:
 
     for cid in [int(x) for x in a.channel_ids.split(",") if x]:
         s.add(Delivery(
-            post_id=p.id,
-            channel_id=cid,
+            post_id=p.id, channel_id=cid,
             idem_key=f"auto{a.id}:{p.id}:{cid}",
-            run_at=now(),
-            status=st,
+            run_at=now(), status=st,
         ))
 
-    log(
-        s,
-        "automation",
+    log(s, "automation",
         f"[{a.id}] «{a.name}» اجرا شد"
         + (" و در انتظار تأیید است" if a.require_approval
-           else " و در صف ارسال قرار گرفت"),
-    )
+           else " و در صف ارسال قرار گرفت"))
 
 
 async def run_automations() -> None:
@@ -854,15 +769,11 @@ async def run_automations() -> None:
 
 def _auto_row(a: Automation) -> dict:
     return {
-        "id": a.id,
-        "name": a.name,
-        "status": a.status,
-        "trigger": a.trigger,
-        "at_time": a.at_time,
+        "id": a.id, "name": a.name, "status": a.status,
+        "trigger": a.trigger, "at_time": a.at_time,
         "weekdays": [int(x) for x in a.weekdays.split(",") if x],
         "interval_min": a.interval_min,
-        "use_ai": a.use_ai,
-        "ai_action": a.ai_action,
+        "use_ai": a.use_ai, "ai_action": a.ai_action,
         "channel_ids": [int(x) for x in a.channel_ids.split(",") if x],
         "require_approval": a.require_approval,
         "last_run": a.last_run,
@@ -872,10 +783,9 @@ def _auto_row(a: Automation) -> dict:
 @app.get("/api/automations")
 def autos():
     with Session() as s:
-        return [
-            _auto_row(a)
-            for a in s.scalars(select(Automation).order_by(Automation.id.desc()))
-        ]
+        return [_auto_row(a) for a in s.scalars(
+            select(Automation).order_by(Automation.id.desc())
+        )]
 
 
 @app.get("/api/automations/logs")
@@ -886,15 +796,15 @@ def auto_logs():
             for a in s.scalars(
                 select(ActivityLog)
                 .where(ActivityLog.kind == "automation")
-                .order_by(ActivityLog.id.desc())
-                .limit(20)
+                .order_by(ActivityLog.id.desc()).limit(20)
             )
         ]
 
 
 @app.post("/api/automations")
 def add_auto(b: AutoIn, request: Request):
-    if not b.name.strip() or not b.channel_ids or not (b.body.strip() or b.template_id):
+    if (not b.name.strip() or not b.channel_ids
+            or not (b.body.strip() or b.template_id)):
         raise HTTPException(400, "نام، کانال و متن یا قالب الزامی است.")
     if b.trigger not in ("daily", "weekly", "interval"):
         raise HTTPException(400, "نوع محرک نامعتبر است.")
@@ -904,21 +814,14 @@ def add_auto(b: AutoIn, request: Request):
         raise HTTPException(400, "حداقل یک روز هفته انتخاب کنید.")
     if not b.require_approval and not auth.can(request.state.user.role, "publish"):
         raise HTTPException(403, "انتشار بدون تأیید نیازمند دسترسی انتشار است.")
-
     with Session() as s:
         a = Automation(
-            name=b.name,
-            trigger=b.trigger,
-            at_time=b.at_time,
+            name=b.name, trigger=b.trigger, at_time=b.at_time,
             weekdays=",".join(map(str, b.weekdays)),
-            interval_min=b.interval_min,
-            template_id=b.template_id,
-            body=b.body,
-            use_ai=b.use_ai,
-            ai_action=b.ai_action,
+            interval_min=b.interval_min, template_id=b.template_id,
+            body=b.body, use_ai=b.use_ai, ai_action=b.ai_action,
             channel_ids=",".join(map(str, b.channel_ids)),
             require_approval=b.require_approval,
-            # For interval triggers, start the countdown now.
             last_run=now() if b.trigger == "interval" else None,
         )
         s.add(a)
@@ -963,7 +866,7 @@ def del_auto(aid: int):
     return {"ok": True}
 
 
-# =============================================================== analytics ==
+# =============================================================== analytics
 
 @app.get("/api/analytics")
 def get_analytics(days: int = 30):
@@ -971,19 +874,17 @@ def get_analytics(days: int = 30):
         return analytics.collect(s, days)
 
 
-# =================================================================== auth ==
+# =================================================================== auth
 
 _fails: dict[str, list[float]] = {}
-_FAIL_WINDOW = 300  # seconds
+_FAIL_WINDOW = 300
 _FAIL_LIMIT = 5
 
 
 def _user(u: User) -> dict:
     return {
-        "id": u.id,
-        "username": u.username,
-        "name": u.display_name or u.username,
-        "role": u.role,
+        "id": u.id, "username": u.username,
+        "name": u.display_name or u.username, "role": u.role,
     }
 
 
@@ -997,8 +898,6 @@ def auth_state():
     with Session() as s:
         return {
             "has_users": bool(s.scalar(select(func.count()).select_from(User))),
-            "eitaa": bool(os.getenv("EITAA_WEBAPP_BOT_TOKEN")),
-            "local": False,
         }
 
 
@@ -1008,8 +907,7 @@ def register(b: RegIn):
     with Session() as s:
         if s.scalar(select(func.count()).select_from(User)):
             raise HTTPException(
-                400, "ثبت‌نام بسته است؛ از مالک بخواهید شما را اضافه کند."
-            )
+                400, "ثبت‌نام بسته است؛ از مالک بخواهید شما را اضافه کند.")
         s.add(Workspace(name="فضای کاری من"))
         u = User(
             username=b.username.strip().lower(),
@@ -1030,8 +928,7 @@ def login(b: LoginIn):
     tries = [t for t in _fails.get(k, []) if t > cutoff]
     if len(tries) >= _FAIL_LIMIT:
         raise HTTPException(
-            429, "تلاش‌های ناموفق زیاد بود؛ چند دقیقه بعد دوباره امتحان کنید."
-        )
+            429, "تلاش‌های ناموفق زیاد بود؛ چند دقیقه بعد دوباره امتحان کنید.")
     with Session() as s:
         u = s.scalar(select(User).where(User.username == k))
         if not u or not auth.verify_pw(b.password, u.pw_hash):
@@ -1041,39 +938,18 @@ def login(b: LoginIn):
         return {"token": auth.make_token(u.id), "user": _user(u)}
 
 
-@app.post("/api/auth/eitaa")
-def eitaa_login(b: EitaaIn):
-    tok = os.getenv("EITAA_WEBAPP_BOT_TOKEN")
-    if not tok:
-        raise HTTPException(501, "ورود با Mini App ایتا پیکربندی نشده است.")
-    info = auth.validate_init_data(b.init_data, tok)
-    if not info or "id" not in info:
-        raise HTTPException(400, "اعتبارسنجی initData ناموفق بود.")
-    with Session() as s:
-        u = s.scalar(select(User).where(User.eitaa_id == str(info["id"])))
-        if not u:
-            raise HTTPException(
-                400,
-                "این حساب ایتا به هیچ عضوی متصل نیست؛ "
-                "از مالک بخواهید شناسه ایتای شما را ثبت کند.",
-            )
-        return {"token": auth.make_token(u.id), "user": _user(u)}
-
-
 @app.get("/api/auth/me")
 def me(request: Request):
     return _user(request.state.user)
 
 
-# =================================================================== team ==
+# =================================================================== team
 
 @app.get("/api/team")
 def team():
     with Session() as s:
-        return [
-            {**_user(u), "eitaa_id": u.eitaa_id}
-            for u in s.scalars(select(User))
-        ]
+        return [{**_user(u), "eitaa_id": u.eitaa_id}
+                for u in s.scalars(select(User))]
 
 
 @app.post("/api/team")
@@ -1086,11 +962,9 @@ def add_member(b: MemberIn):
         if s.scalar(select(User).where(User.username == uname)):
             raise HTTPException(400, "این نام کاربری قبلاً ثبت شده است.")
         u = User(
-            username=uname,
-            display_name=b.display_name,
+            username=uname, display_name=b.display_name,
             pw_hash=auth.hash_pw(b.password),
-            role=b.role,
-            eitaa_id=b.eitaa_id or None,
+            role=b.role, eitaa_id=b.eitaa_id or None,
         )
         s.add(u)
         log(s, "team", f"عضو {u.username} با نقش {u.role} اضافه شد")
@@ -1110,27 +984,17 @@ def del_member(uid: int, request: Request):
     return {"ok": True}
 
 
-# ============================================================== health check =
+# ================================================================= health
 
 @app.get("/api/health")
 def health():
-    """Public liveness probe — useful for the client to detect a live server."""
-    return {
-        "ok": True,
-        "app": "Eitaa Channel Manager",
-        "time": now().isoformat(timespec="seconds"),
-    }
+    return {"ok": True, "app": "Eitaa Manager",
+            "time": now().isoformat(timespec="seconds")}
 
 
-# ================================================================ security ==
+# =============================================================== security
 
-PUBLIC = (
-    "/api/health",
-    "/api/auth/state",
-    "/api/auth/register",
-    "/api/auth/login",
-    "/api/auth/eitaa",
-)
+PUBLIC = ("/api/health", "/api/auth/state", "/api/auth/register", "/api/auth/login")
 
 RULES = [
     (("GET", "POST", "DELETE"), r"^/api/team", "owner"),
@@ -1145,11 +1009,9 @@ RULES = [
 @app.middleware("http")
 async def guard(request: Request, call_next):
     path = request.url.path
-    if (
-        not path.startswith("/api/")
-        or path in PUBLIC
-        or request.method == "OPTIONS"
-    ):
+    if (not path.startswith("/api/")
+            or path in PUBLIC
+            or request.method == "OPTIONS"):
         return await call_next(request)
 
     raw = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
@@ -1161,11 +1023,11 @@ async def guard(request: Request, call_next):
     request.state.user = u
 
     for methods, rx, perm in RULES:
-        if request.method in methods and re.match(rx, path) and not auth.can(u.role, perm):
+        if (request.method in methods and re.match(rx, path)
+                and not auth.can(u.role, perm)):
             return JSONResponse(
                 {"detail": "دسترسی لازم برای این عملیات را ندارید."},
-                status_code=403,
-            )
+                status_code=403)
     return await call_next(request)
 
 
