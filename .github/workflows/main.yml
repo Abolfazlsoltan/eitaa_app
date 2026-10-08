@@ -75,9 +75,8 @@ jobs:
       - name: Build APK
         run: |
           set -o pipefail
-          flet build apk --verbose --clear-cache 2>&1 | tee build_logs/flet-build.log
+          flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
 
-      # ---------- on failure, print the real Gradle error ----------
       - name: Show build log on failure
         if: failure()
         run: |
