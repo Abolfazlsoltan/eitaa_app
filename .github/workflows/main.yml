@@ -18,6 +18,8 @@ jobs:
     env:
       FLET_CLI_NO_RICH_OUTPUT: "1"
       PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - name: Checkout repository
@@ -28,9 +30,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            backend/requirements.txt
+          cache-dependency-path: pyproject.toml
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -66,28 +66,25 @@ jobs:
           flet --version
           java -version
 
-      - name: Preflight checks
-        run: |
-          flutter doctor -v
-          echo "--- files in repo root ---"
-          ls -la
-          echo "--- files in src/ ---"
-          ls -la src/
-          echo "--- files in assets/ ---"
-          ls -la assets/
-
       - name: Clean build caches
         run: |
-          rm -rf ~/.gradle/caches
-          rm -rf ~/.gradle/wrapper
-          rm -rf ~/.pub-cache
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.pub-cache
           rm -rf build .dart_tool .flet
           mkdir -p build_logs
 
       - name: Build APK
         run: |
           set -o pipefail
-          flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
+          flet build apk --verbose --clear-cache 2>&1 | tee build_logs/flet-build.log
+
+      # ---------- on failure, print the real Gradle error ----------
+      - name: Show build log on failure
+        if: failure()
+        run: |
+          echo "=========== FULL BUILD LOG ==========="
+          cat build_logs/flet-build.log || true
+          echo "=========== GRADLE OUTPUT ============"
+          find . -name "*.log" -path "*gradle*" -exec cat {} \; || true
 
       - name: Find APK
         if: always()
