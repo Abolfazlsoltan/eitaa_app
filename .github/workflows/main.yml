@@ -20,6 +20,7 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PYTHONUTF8: "1"
       PYTHONDONTWRITEBYTECODE: "1"
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
 
     steps:
       - name: Checkout repository
@@ -58,43 +59,79 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "flet==1.0.3"
 
-      - name: Show files
-        run: |
-          echo "=== repo root ==="
-          ls -la
-          echo "=== src/ ==="
-          ls -la src/
-          echo "=== pyproject.toml ==="
-          cat pyproject.toml
-
       - name: Clean build caches
         run: |
           rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.pub-cache
           rm -rf build .dart_tool .flet
           mkdir -p build_logs
 
-      - name: Build APK
+      # ================================================================
+      # Attempt 1 — Flet's normal build
+      # ================================================================
+      - name: Build APK (attempt 1 - flet)
+        id: build1
+        continue-on-error: true
         run: |
           set +e
           flet build apk --verbose > build_logs/flet-build.log 2>&1
-          BUILD_EXIT=$?
-          echo "=== flet build exit code: $BUILD_EXIT ==="
-          echo "=== last 120 lines ==="
-          tail -120 build_logs/flet-build.log
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
 
-          # On failure, try building directly through Flutter so we can
-          # surface the real Gradle error instead of Flet's generic one.
-          if [ $BUILD_EXIT -ne 0 ]; then
-            echo ""
-            echo "=== direct flutter build attempt ==="
-            if [ -d build/flutter ]; then
-              cd build/flutter
-              flutter pub get 2>&1 | tail -50 || true
-              flutter build apk --release 2>&1 | tail -150 || true
-            fi
+      # ================================================================
+      # If flet failed — investigate and try direct flutter build
+      # ================================================================
+      - name: Investigate build tree
+        if: steps.build1.outcome == 'failure'
+        run: |
+          echo "===== build/ top-level ====="
+          find build -maxdepth 3 -type d 2>/dev/null | sort | head -80
+          echo ""
+          echo "===== Looking for site-packages ====="
+          find build -type d -name "site-packages" 2>/dev/null | head -10
+          echo ""
+          echo "===== Looking for app.py or main.py inside build ====="
+          find build -maxdepth 6 -type f \( -name "main.py" -o -name "app.py" \) 2>/dev/null | head -10
+          echo ""
+          echo "===== build/flutter directory contents ====="
+          ls -la build/flutter/ 2>/dev/null || echo "no build/flutter"
+          echo ""
+          echo "===== build/flutter/app if exists ====="
+          ls -la build/flutter/app/ 2>/dev/null || echo "no build/flutter/app"
+
+      - name: Build APK (attempt 2 - direct flutter)
+        if: steps.build1.outcome == 'failure'
+        run: |
+          set +e
+
+          if [ ! -d build/flutter ]; then
+            echo "build/flutter does not exist — cannot retry"
+            exit 1
           fi
-          exit $BUILD_EXIT
 
+          # Find where serious_python put the site-packages.
+          SP=$(find build -type d -name "site-packages" 2>/dev/null | head -1)
+          if [ -z "$SP" ]; then
+            # Flet's usual location is build/flutter/app/.
+            SP="$(pwd)/build/flutter/app"
+            echo "no site-packages found, guessing: $SP"
+          fi
+          echo "SERIOUS_PYTHON_SITE_PACKAGES=$SP"
+
+          # Also set the older name for backwards compatibility.
+          export SERIOUS_PYTHON_SITE_PACKAGES="$SP"
+          export SERIOUS_PYTHON_SITE_PACKAGES_DIR="$SP"
+
+          cd build/flutter
+
+          # Stop any stale daemon.
+          pkill -f gradle || true
+
+          echo "===== flutter build apk ====="
+          flutter build apk --release 2>&1 | tail -300
+          exit ${PIPESTATUS[0]}
+
+      # ================================================================
+      # Collect result
+      # ================================================================
       - name: Find APK
         if: always()
         run: |
