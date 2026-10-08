@@ -1,85 +1,47 @@
-"""Build-time configuration for the Eitaa Channel Manager Android client.
+"""Eitaa Manager — Application configuration.
 
-Two execution modes
--------------------
-The client can run in one of two modes, chosen by the `MODE` constant below:
+Every value that varies between builds is centralized here. You can override
+any of them at build time via environment variables, which is convenient for
+CI builds where you do not want to edit source files.
 
-    MODE = "local"   ← همه چیز روی گوشی اجرا می‌شود (پیش‌فرض فعلی)
-    MODE = "server"  ← کلاینت به FastAPI بک‌اند وصل می‌شود
-
-In local mode the app does not need any server. AI calls go directly to
-Groq and posts go directly to EitaaYar from the device. Features that
-strictly require a 24/7 worker (scheduling, automations, media library,
-team management, advanced analytics) are disabled with a clear message
-instead of failing.
-
-In server mode the app behaves exactly like before: it talks to the
-FastAPI backend at SERVER_URL.
-
-Switching to server later
--------------------------
-When you have a server running, change these two lines:
-
-    MODE = "server"
-    SERVER_URL = "https://channels.example.com"
-
-Nothing else needs to change.
-
-Credentials
------------
-For the current test phase, the EitaaYar token, the Groq API key and the
-default channel are hard-coded below so the app works out of the box.
-Normal users never see these values — the onboarding and settings screens
-hide them and only show a "connected" state. Later, when the app is
-public, these should be removed and users should enter their own values.
+    EITAA_SERVER_URL   — optional backend address
+    EITAA_TOKEN        — EitaaYar bot token
+    EITAA_CHANNEL      — default channel identifier
+    GROQ_API_KEY       — Groq API key for AI features
 """
 
 import os
 
-# --------------------------------------------------------------------- mode ---
-# "local"  → everything runs on the device (no server needed)
-# "server" → client connects to the FastAPI backend at SERVER_URL
-MODE = "local"
+# ------------------------------------------------------------------ identity
+APP_NAME = "ایتا منیجر"
+APP_TAGLINE = "مدیریت هوشمند کانال‌های ایتا"
+VERSION = "2.0.0"
 
-# Only used when MODE == "server". Ignored in local mode.
-# Example: "https://channels.example.com" (no trailing slash, no "/api")
-SERVER_URL = ""
+# ------------------------------------------------------------------- backend
+# Optional backend address. When empty, the app keeps all data on the device
+# and connects directly to EitaaYar and the AI service. When set, the app
+# syncs through the FastAPI backend at this address.
+SERVER_URL = os.getenv("EITAA_SERVER_URL", "").strip().rstrip("/")
 
-# Environment variable can override SERVER_URL at build time:
-#   export EITAA_CLIENT_SERVER_URL="https://..."
-# It has no effect in local mode.
-if os.getenv("EITAA_CLIENT_SERVER_URL"):
-    SERVER_URL = os.getenv("EITAA_CLIENT_SERVER_URL", "").strip().rstrip("/")
-    MODE = "server"
+# --------------------------------------------------------------- credentials
+# EitaaYar bot token used to publish on the user's behalf.
+EITAA_TOKEN = os.getenv(
+    "EITAA_TOKEN",
+    "bot278898:9e293be8-2dc3-4483-9e0b-f81d0f39efc7",
+)
 
-# ------------------------------------------------------------------ identity --
-APP_NAME = "مدیریت کانال ایتا"
-VERSION = "1.1.0"
+# Channel that the app connects to automatically on first run.
+EITAA_CHANNEL = os.getenv("EITAA_CHANNEL", "11259266")
 
-# -------------------------------------------------------------- credentials --
-# ⚠️ TEST PHASE ONLY — these values are baked into the APK.
-# They are hidden from the UI but a determined user can still extract them
-# from the installed app. Do NOT ship this to the public Play Store.
+# --------------------------------------------------------------- AI service
+GROQ_API_KEY = os.getenv(
+    "GROQ_API_KEY",
+    "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",
+)
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-# EitaaYar bot token (includes the "botNNN:" prefix).
-EITAA_TOKEN = "bot278898:9e293be8-2dc3-4483-9e0b-f81d0f39efc7"
-
-# Default channel that the app connects to on first run.
-DEFAULT_CHANNEL_ID = "11259266"
-
-# Groq API key for AI features.
-GROQ_API_KEY = "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"
-GROQ_MODEL = "llama-3.3-70b-versatile"
-
-# -------------------------------------------------------------- HTTP client --
-# Normal API calls (Groq, EitaaYar): 30 seconds.
-REQUEST_TIMEOUT = 30
-
-# Uploads (when server mode is on): 180 seconds.
-UPLOAD_TIMEOUT = 180
-
-# -------------------------------------------------------- Android cleartext ---
-# Android 9+ blocks plain http:// by default. In local mode we always talk
-# to the internet over https:// so this can stay False. It only matters when
-# you test server mode against a local backend over http://.
-ALLOW_CLEARTEXT = False
+# ------------------------------------------------------------------- layout
+# Number of items kept in the local activity feed.
+ACTIVITY_LIMIT = 60
+# Maximum number of locally stored posts.
+POSTS_LIMIT = 200
