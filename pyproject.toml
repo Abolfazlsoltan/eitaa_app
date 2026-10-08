@@ -15,9 +15,10 @@ org = "app.eitaamanager"
 [tool.flet.app]
 path = "src"
 
-# Pin transitive Flutter dependencies to versions compatible with Flet 1.0.3.
-# serious_python_android 5.0.0 requires SERIOUS_PYTHON_SITE_PACKAGES to be set
-# at Gradle time, but Flet 1.0.3 does not set it — so we force 4.x.
+# Pin the whole serious_python family to 4.x.
+# The 5.0.0 line requires SERIOUS_PYTHON_SITE_PACKAGES at Gradle time,
+# which Flet 1.0.3 does not set. 4.7.2 (recommended by pub) has no such
+# requirement and stays fully compatible with Flet 1.0.3.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni = "1.1.0"
-serious_python_android = "4.1.0"
+serious_python = "4.7.2"
