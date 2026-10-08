@@ -9,7 +9,9 @@
 name = "eitaa-manager"
 version = "2.0.0"
 description = "مدیریت هوشمند کانال‌های ایتا"
-requires-python = ">=3.10"
+# Pin to Python 3.12: the only version with prebuilt wheels for all
+# dependencies on Android. 3.13/3.14 lack many Android wheels.
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "flet>=1.0,<2.0",
     "httpx>=0.27",
