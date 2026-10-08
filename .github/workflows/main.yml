@@ -89,16 +89,28 @@ jobs:
       # ---- build with TTY emulation so Flet prints the real error ----
       - name: Build APK
         run: |
-          set +e
+          set -e
           # `script` allocates a pseudo-TTY, forcing Rich to flush everything.
-          script -q -c "flet build apk --verbose" build_logs/flet-build.log
-          BUILD_EXIT=$?
+          script -q -c "flet build apk --verbose" build_logs/flet-build.log || BUILD_EXIT=$?
+          BUILD_EXIT=${BUILD_EXIT:-$?}
+          
           # Strip ANSI escape codes so the log is readable.
           if [ -f build_logs/flet-build.log ]; then
             sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' build_logs/flet-build.log || true
+            echo "===== FLET BUILD LOG (last 100 lines) ====="
+            tail -100 build_logs/flet-build.log
           fi
+          
           echo "Flet build exit code: $BUILD_EXIT"
-          exit $BUILD_EXIT
+          
+          # Check if APK was created before exiting
+          if [ ! -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
+            echo "ERROR: APK file not found after build!"
+            ls -la build/ 2>/dev/null || true
+            exit 1
+          fi
+          
+          exit ${BUILD_EXIT:-0}
 
       # ---- on failure, dump everything we can ----
       - name: Dump full logs on failure
