@@ -2,9 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 concurrency:
@@ -17,8 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
+    env:
+      # Disable Flet's Rich terminal formatting so the real error is visible
+      # in the plain build log instead of being hidden by progress spinners.
+      FLET_CLI_NO_RICH_OUTPUT: "1"
+      # Make Python output unbuffered so build logs stream in real time.
+      PYTHONUNBUFFERED: "1"
+
     steps:
-      # --------------------------------------------------------------- setup
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -47,16 +51,15 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev mesa-utils
+          sudo apt-get install -y libgtk-3-dev mesa-utils pkg-config
 
       - name: Accept Android licenses
         run: yes | flutter doctor --android-licenses || true
 
-      # ------------------------------------------------------------- install
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "flet>=1.0,<2.0"
+          python -m pip install "flet==1.0.5"
 
       - name: Show environment
         run: |
@@ -65,31 +68,33 @@ jobs:
           flutter --version
           flet --version
           java -version
-          flutter doctor -v
 
-      # --------------------------------------------------------------- build
+      - name: Preflight flutter checks
+        run: |
+          flutter doctor -v
+          echo "--- flutter doctor exit code: $? ---"
+          ls -la
+          ls -la src/
+          ls -la assets/
+
       - name: Clean build caches
         run: |
           rm -rf ~/.gradle/caches
           rm -rf ~/.gradle/wrapper
           rm -rf ~/.pub-cache
-          rm -rf build
-          rm -rf .dart_tool
-          rm -rf .flet
+          rm -rf build .dart_tool .flet
+          mkdir -p build_logs
 
       - name: Build APK
         run: |
-          mkdir -p build_logs
           set -o pipefail
           flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
 
-      # -------------------------------------------------------------- upload
       - name: Find APK
         if: always()
         run: |
           echo "===== APK files ====="
           find . -type f -name "*.apk" -print || true
-          echo "===== Sizes ====="
           find . -type f -name "*.apk" -exec ls -lh {} \; || true
 
       - name: Upload APK
