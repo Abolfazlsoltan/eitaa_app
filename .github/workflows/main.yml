@@ -16,10 +16,7 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # Disable Flet's Rich terminal formatting so the real error is visible
-      # in the plain build log instead of being hidden by progress spinners.
       FLET_CLI_NO_RICH_OUTPUT: "1"
-      # Make Python output unbuffered so build logs stream in real time.
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -59,7 +56,7 @@ jobs:
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "flet==1.0.5"
+          python -m pip install "flet==1.0.3"
 
       - name: Show environment
         run: |
@@ -69,12 +66,14 @@ jobs:
           flet --version
           java -version
 
-      - name: Preflight flutter checks
+      - name: Preflight checks
         run: |
           flutter doctor -v
-          echo "--- flutter doctor exit code: $? ---"
+          echo "--- files in repo root ---"
           ls -la
+          echo "--- files in src/ ---"
           ls -la src/
+          echo "--- files in assets/ ---"
           ls -la assets/
 
       - name: Clean build caches
