@@ -1,21 +1,3 @@
-# =============================================================================
-# Eitaa Channel Manager — Android APK build
-# =============================================================================
-# Builds a signed-in-debug APK on every push to `main` / `master` and on
-# manual trigger, then uploads it as a workflow artifact.
-#
-# The build pipeline:
-#   1. Installs Python 3.12, Java 17, Flutter (pinned) and Flet.
-#   2. Clears caches to avoid stale-artifact build failures.
-#   3. Runs `flet build apk` from the repository root.
-#      - The Flet config in pyproject.toml points at `src/` and bundles
-#        `assets/` (which contains icon.png).
-#      - The backend folder is never touched by the build.
-#   4. Uploads the produced APK plus the full build log.
-#
-# Download the result from the "Artifacts" section of the workflow run.
-# =============================================================================
-
 name: Build APK
 
 on:
@@ -23,10 +5,8 @@ on:
     branches:
       - main
       - master
-  # Allow manual runs from the Actions tab.
   workflow_dispatch:
 
-# Cancel an in-progress build if a newer commit arrives on the same branch.
 concurrency:
   group: apk-${{ github.ref }}
   cancel-in-progress: true
@@ -38,7 +18,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # ---------------------------------------------------------------- setup
+      # --------------------------------------------------------------- setup
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -71,8 +51,6 @@ jobs:
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          # Pin the Flet major version for reproducible builds.
-          # Update this only when you are ready to test a new Flet release.
           python -m pip install "flet>=1.0,<2.0"
 
       - name: Show environment
@@ -113,19 +91,18 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: eitaa-app-apk
+          name: eitaa-manager-apk
           path: |
             build/**/*.apk
             **/*.apk
           if-no-files-found: error
-          # Keep the artifact available for 30 days (default is 90).
           retention-days: 30
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eitaa-app-build-log
+          name: eitaa-manager-build-log
           path: build_logs/flet-build.log
           if-no-files-found: warn
           retention-days: 14
