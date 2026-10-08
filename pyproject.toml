@@ -1,41 +1,19 @@
-# =============================================================================
-# Eitaa Manager — Android/desktop client
-# =============================================================================
-# Build the APK:   flet build apk
-# Run on desktop:  flet run src/main.py
-# =============================================================================
-
 [project]
 name = "eitaa-manager"
 version = "2.0.0"
 description = "مدیریت هوشمند کانال‌های ایتا"
-# Pin to Python 3.12: the only version with prebuilt wheels for all
-# dependencies on Android. 3.13/3.14 lack many Android wheels.
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "flet>=1.0,<2.0",
     "httpx>=0.27",
 ]
 
-# -----------------------------------------------------------------------------
-# App identity
-# -----------------------------------------------------------------------------
 [tool.flet]
 product = "ایتا منیجر"
 org = "app.eitaamanager"
-icon = "assets/icon.png"
 
-# -----------------------------------------------------------------------------
-# Source layout
-# -----------------------------------------------------------------------------
 [tool.flet.app]
 path = "src"
-assets_dir = "assets"
 
-# -----------------------------------------------------------------------------
-# Android build fix
-# -----------------------------------------------------------------------------
-# jni_flutter 1.0.4+1 requires jni >= 1.1.0, while the generated Flet project
-# may otherwise pin jni to 1.0.0, causing a Gradle dependency conflict.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni = "1.1.0"
