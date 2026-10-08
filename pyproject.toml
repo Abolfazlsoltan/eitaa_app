@@ -15,10 +15,5 @@ org = "app.eitaamanager"
 [tool.flet.app]
 path = "src"
 
-# Pin the whole serious_python family to 4.x.
-# The 5.0.0 line requires SERIOUS_PYTHON_SITE_PACKAGES at Gradle time,
-# which Flet 1.0.3 does not set. 4.7.2 (recommended by pub) has no such
-# requirement and stays fully compatible with Flet 1.0.3.
 [tool.flet.flutter.pubspec.dependency_overrides]
 jni = "1.1.0"
-serious_python = "4.7.2"
