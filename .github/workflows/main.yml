@@ -56,43 +56,18 @@ jobs:
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "flet==1.0.3" pillow
+          python -m pip install "flet==1.0.3"
 
-      # -------- automatically fix the icon to 1024x1024 PNG --------
-      - name: Fix app icon
+      - name: Show files
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          from PIL import Image
-
-          src = Path("assets/icon.png")
-          if not src.exists():
-              raise SystemExit("assets/icon.png not found")
-
-          img = Image.open(src)
-          print(f"before: {img.format} {img.size} {img.mode}")
-
-          if img.mode != "RGBA":
-              img = img.convert("RGBA")
-
-          w, h = img.size
-          side = min(w, h)
-          left = (w - side) // 2
-          top = (h - side) // 2
-          img = img.crop((left, top, left + side, top + side))
-          img = img.resize((1024, 1024), Image.LANCZOS)
-          img.save(src, format="PNG", optimize=True)
-
-          print(f"after:  PNG {img.size} {img.mode}")
-          PY
-
-      - name: Show environment
-        run: |
-          python --version
-          pip show flet | grep -E "^(Name|Version)"
-          flutter --version
-          flet --version
-          java -version
+          echo "=== repo root ==="
+          ls -la
+          echo "=== src/ ==="
+          ls -la src/
+          echo "=== assets/ (if present) ==="
+          ls -la assets/ 2>/dev/null || echo "no assets folder"
+          echo "=== pyproject.toml ==="
+          cat pyproject.toml
 
       - name: Clean build caches
         run: |
@@ -100,30 +75,39 @@ jobs:
           rm -rf build .dart_tool .flet
           mkdir -p build_logs
 
+      # ---- build with correct exit code capture (no pipe) ----
       - name: Build APK
         run: |
           set +e
-          flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
+          flet build apk --verbose > build_logs/flet-build.log 2>&1
           BUILD_EXIT=$?
-          sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' build_logs/flet-build.log || true
-          echo "Flet build exit code: $BUILD_EXIT"
-          exit $BUILD_EXIT
+          echo "=== flet build exit code: $BUILD_EXIT ==="
+          echo "=== last 200 lines of flet log ==="
+          tail -200 build_logs/flet-build.log
 
-      - name: Dump full logs on failure
-        if: failure()
-        run: |
-          echo "=========== FULL FLET LOG ==========="
-          cat build_logs/flet-build.log || true
-          echo ""
-          echo "=========== ANY .log FILES ==========="
-          find build -name "*.log" -exec echo "--- {} ---" \; -exec tail -200 {} \; 2>/dev/null || true
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo ""
+            echo "=== flet failed — running flutter directly for real error ==="
+            if [ -d build/flutter ]; then
+              cd build/flutter
+              echo "--- flutter pub get ---"
+              flutter pub get 2>&1 | tail -80 || true
+              echo ""
+              echo "--- flutter build apk ---"
+              flutter build apk --release 2>&1 | tail -200 || true
+            else
+              echo "no build/flutter directory found"
+              find . -maxdepth 3 -type d | head -50
+            fi
+          fi
+          exit $BUILD_EXIT
 
       - name: Find APK
         if: always()
         run: |
           echo "===== APK files ====="
-          find . -type f -name "*.apk" -print || true
-          find . -type f -name "*.apk" -exec ls -lh {} \; || true
+          find . -type f -name "*.apk" -print 2>/dev/null || true
+          find . -type f -name "*.apk" -exec ls -lh {} \; 2>/dev/null || true
 
       - name: Upload APK
         if: success()
