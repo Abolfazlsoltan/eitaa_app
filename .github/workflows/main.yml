@@ -1,280 +1,437 @@
 name: Build APK
 
 on:
-  push:
-    branches: [main, master]
-  workflow_dispatch:
+push:
+branches: [main, master]
+workflow_dispatch:
 
 concurrency:
-  group: apk-${{ github.ref }}
-  cancel-in-progress: true
+group: apk-${{ github.ref }}
+cancel-in-progress: true
 
 jobs:
-  build-apk:
-    name: Build Android APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+build-apk:
+name: Build Android APK
+runs-on: ubuntu-latest
+timeout-minutes: 90
 
-    env:
-      NO_COLOR: "1"
-      PYTHONUNBUFFERED: "1"
-      PYTHONUTF8: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-      GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+env:
+  NO_COLOR: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+steps:
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+  # ================================================================
+  # Checkout
+  # ================================================================
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
+  # ================================================================
+  # Python
+  # ================================================================
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.12"
+      cache: pip
+      cache-dependency-path: pyproject.toml
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.44.8"
-          channel: stable
-          cache: true
+  # ================================================================
+  # Java
+  # ================================================================
+  - name: Setup Java
+    uses: actions/setup-java@v5
+    with:
+      distribution: temurin
+      java-version: "17"
 
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-3-dev \
-            mesa-utils \
-            pkg-config
+  # ================================================================
+  # Flutter
+  # ================================================================
+  - name: Setup Flutter
+    uses: subosito/flutter-action@v2
+    with:
+      flutter-version: "3.44.8"
+      channel: stable
+      cache: true
 
-      - name: Accept Android licenses
-        run: |
-          yes | flutter doctor --android-licenses || true
+  # ================================================================
+  # Linux dependencies
+  # ================================================================
+  - name: Install Linux dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y \
+        libgtk-3-dev \
+        mesa-utils \
+        pkg-config
 
-      - name: Check Flutter and Android environment
-        run: |
-          flutter --version
-          flutter doctor -v
-          java -version
+  # ================================================================
+  # Android licenses
+  # ================================================================
+  - name: Accept Android licenses
+    run: |
+      yes | flutter doctor --android-licenses || true
 
-      - name: Install Flet
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "flet==1.0.3"
+  # ================================================================
+  # Environment check
+  # ================================================================
+  - name: Check build environment
+    run: |
+      echo "===== Python ====="
+      python --version
 
-      - name: Clean build caches
-        run: |
-          rm -rf ~/.gradle/caches
-          rm -rf ~/.gradle/wrapper
-          rm -rf ~/.pub-cache
-          rm -rf build
-          rm -rf .dart_tool
-          rm -rf .flet
+      echo ""
+      echo "===== Java ====="
+      java -version
 
-          mkdir -p build_logs
+      echo ""
+      echo "===== Flutter ====="
+      flutter --version
 
-      # ================================================================
-      # Attempt 1 — Flet
-      # ================================================================
-      - name: Build APK with Flet
-        id: build1
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
+      echo ""
+      echo "===== Flutter Doctor ====="
+      flutter doctor -v
 
-          echo "===== Starting Flet APK build ====="
+  # ================================================================
+  # Install Flet
+  # ================================================================
+  - name: Install Flet
+    run: |
+      python -m pip install --upgrade pip
+      python -m pip install "flet==1.0.3"
 
-          flet build apk --verbose \
-            2>&1 | tee build_logs/flet-build.log
+      echo ""
+      echo "===== Flet version ====="
+      flet --version
 
-          EXIT_CODE=${PIPESTATUS[0]}
+  # ================================================================
+  # Clean old build files
+  # ================================================================
+  - name: Clean build caches
+    run: |
+      rm -rf ~/.gradle/caches
+      rm -rf ~/.gradle/wrapper
+      rm -rf ~/.pub-cache
 
-          echo "Flet exit code: $EXIT_CODE"
+      rm -rf build
+      rm -rf .dart_tool
+      rm -rf .flet
 
-          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+      mkdir -p build_logs
 
-          exit "$EXIT_CODE"
+  # ================================================================
+  # Attempt 1 — Flet build
+  # ================================================================
+  - name: Build APK with Flet
+    id: build1
+    continue-on-error: true
+    shell: bash
+    run: |
+      set +e
 
-      # ================================================================
-      # Search for APK after Flet
-      # ================================================================
-      - name: Search for APK after Flet
-        if: always()
-        shell: bash
-        run: |
-          echo "===== APK files after Flet ====="
+      echo "========================================"
+      echo "Starting Flet APK build"
+      echo "========================================"
 
-          find . \
-            -type f \
-            -name "*.apk" \
-            -not -path "./.git/*" \
-            -print \
-            2>/dev/null || true
+      flet build apk --verbose \
+        2>&1 | tee build_logs/flet-build.log
 
-      # ================================================================
-      # If Flet failed, inspect generated Flutter project
-      # ================================================================
-      - name: Investigate Flet failure
-        if: steps.build1.outcome == 'failure'
-        shell: bash
-        run: |
-          echo "===== Flet failed ====="
+      EXIT_CODE=${PIPESTATUS[0]}
 
-          echo ""
-          echo "===== build directory ====="
-          if [ -d build ]; then
-            find build -maxdepth 4 -type d | sort | head -200
-          else
-            echo "build directory does not exist"
-          fi
+      echo ""
+      echo "Flet exit code: $EXIT_CODE"
 
-          echo ""
-          echo "===== Flutter projects ====="
-          find . \
-            -type f \
-            -name "pubspec.yaml" \
-            -not -path "./.git/*" \
-            -print \
-            2>/dev/null || true
+      echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
-          echo ""
-          echo "===== Gradle projects ====="
-          find . \
-            -type f \
-            -name "gradlew" \
-            -not -path "./.git/*" \
-            -print \
-            2>/dev/null || true
+      exit "$EXIT_CODE"
 
-          echo ""
-          echo "===== Python files in build ====="
-          find build \
-            -type f \
-            \( -name "main.py" -o -name "app.py" \) \
-            2>/dev/null | head -30 || true
+  # ================================================================
+  # Search APK after Flet
+  # ================================================================
+  - name: Search APK after Flet
+    if: always()
+    shell: bash
+    run: |
+      echo "========================================"
+      echo "APK files after Flet"
+      echo "========================================"
 
-          echo ""
-          echo "===== site-packages ====="
-          find build \
-            -type d \
-            -name "site-packages" \
-            2>/dev/null | head -30 || true
+      find . \
+        -type f \
+        -name "*.apk" \
+        -not -path "./.git/*" \
+        -print \
+        2>/dev/null || true
 
-      # ================================================================
-      # Attempt 2 — Direct Flutter build
-      # ================================================================
-      - name: Build APK with Flutter fallback
-        if: steps.build1.outcome == 'failure'
-        shell: bash
-        run: |
-          set -e
+  # ================================================================
+  # Investigate Flet output
+  # ================================================================
+  - name: Investigate Flet output
+    if: steps.build1.outcome == 'failure'
+    shell: bash
+    run: |
+      echo "========================================"
+      echo "Flet build failed - investigating"
+      echo "========================================"
 
-          if [ ! -d "build/flutter" ]; then
-            echo "ERROR: build/flutter does not exist."
-            echo "Flet did not generate a Flutter project."
-            exit 1
-          fi
+      echo ""
+      echo "===== build directories ====="
 
-          cd build/flutter
+      if [ -d build ]; then
+        find build \
+          -maxdepth 5 \
+          -type d \
+          2>/dev/null | sort | head -250
+      else
+        echo "build directory does not exist"
+      fi
 
-          echo "===== Flutter project ====="
-          ls -la
+      echo ""
+      echo "===== Flutter projects ====="
 
-          echo ""
-          echo "===== pubspec.yaml ====="
-          cat pubspec.yaml || true
+      find . \
+        -type f \
+        -name "pubspec.yaml" \
+        -not -path "./.git/*" \
+        -print \
+        2>/dev/null || true
 
-          echo ""
-          echo "===== Flutter dependencies ====="
-          flutter pub get
+      echo ""
+      echo "===== Gradle projects ====="
 
-          echo ""
-          echo "===== Building APK ====="
-          flutter build apk --release
+      find . \
+        -type f \
+        -name "gradlew" \
+        -not -path "./.git/*" \
+        -print \
+        2>/dev/null || true
 
-      # ================================================================
-      # Final APK search
-      # ================================================================
-      - name: Find final APK
-        if: always()
-        shell: bash
-        run: |
-          echo "========================================"
-          echo "FINAL APK SEARCH"
-          echo "========================================"
+      echo ""
+      echo "===== site-packages ====="
 
-          APK_COUNT=$(find . \
-            -type f \
-            -name "*.apk" \
-            -not -path "./.git/*" \
-            2>/dev/null | wc -l)
+      find build \
+        -type d \
+        -name "site-packages" \
+        2>/dev/null | head -50 || true
 
-          echo "APK count: $APK_COUNT"
+      echo ""
+      echo "===== Python entry files ====="
 
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo ""
-            echo "ERROR: No APK was generated."
-            echo ""
-            echo "===== Build directory ====="
-            find build -maxdepth 5 -type f 2>/dev/null | head -300 || true
+      find build \
+        -type f \
+        -name "main.py" -o -name "app.py" \
+        2>/dev/null | head -50 || true
 
-            echo ""
-            echo "===== Flet build log ====="
-            tail -300 build_logs/flet-build.log 2>/dev/null || true
+      echo ""
+      echo "===== build/flutter ====="
 
-            exit 1
-          fi
+      if [ -d build/flutter ]; then
+        ls -la build/flutter
+      else
+        echo "build/flutter does not exist"
+      fi
 
-          echo ""
-          echo "===== APK files ====="
+  # ================================================================
+  # Attempt 2 — Direct Flutter build
+  # ================================================================
+  - name: Build APK with Flutter fallback
+    if: steps.build1.outcome == 'failure'
+    shell: bash
+    run: |
+      set -e
 
-          find . \
-            -type f \
-            -name "*.apk" \
-            -not -path "./.git/*" \
-            -print \
-            2>/dev/null
+      echo "========================================"
+      echo "Starting Flutter fallback build"
+      echo "========================================"
 
-          echo ""
-          echo "===== APK sizes ====="
+      if [ ! -d "$GITHUB_WORKSPACE/build/flutter" ]; then
+        echo "ERROR: build/flutter does not exist."
+        echo "Flet did not generate a Flutter project."
+        exit 1
+      fi
 
-          find . \
-            -type f \
-            -name "*.apk" \
-            -not -path "./.git/*" \
-            -exec ls -lh {} \; \
-            2>/dev/null
+      # ------------------------------------------------------------
+      # Find serious_python site-packages
+      # ------------------------------------------------------------
+      echo ""
+      echo "===== Searching for site-packages ====="
 
-      # ================================================================
-      # Upload APK
-      # ================================================================
-      - name: Upload APK
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eitaa-manager-apk
-          path: |
-            **/*.apk
-          if-no-files-found: error
-          retention-days: 30
+      SP=$(find "$GITHUB_WORKSPACE/build" \
+        -type d \
+        -name "site-packages" \
+        2>/dev/null | head -1)
 
-      # ================================================================
-      # Upload logs
-      # ================================================================
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eitaa-manager-build-log
-          path: |
-            build_logs/**
-          if-no-files-found: warn
-          retention-days: 14
+      if [ -z "$SP" ]; then
+        echo ""
+        echo "ERROR: Could not find serious_python site-packages."
+        echo ""
+        echo "Searching build tree:"
+        find "$GITHUB_WORKSPACE/build" \
+          -maxdepth 8 \
+          -type d \
+          2>/dev/null | sort | head -500
+
+        exit 1
+      fi
+
+      echo "Found site-packages:"
+      echo "$SP"
+
+      # ------------------------------------------------------------
+      # IMPORTANT:
+      # Make variable available to all following GitHub steps
+      # ------------------------------------------------------------
+      echo "SERIOUS_PYTHON_SITE_PACKAGES=$SP" >> "$GITHUB_ENV"
+
+      # Backwards-compatible variable
+      echo "SERIOUS_PYTHON_SITE_PACKAGES_DIR=$SP" >> "$GITHUB_ENV"
+
+      # Also export inside this shell
+      export SERIOUS_PYTHON_SITE_PACKAGES="$SP"
+      export SERIOUS_PYTHON_SITE_PACKAGES_DIR="$SP"
+
+      echo ""
+      echo "SERIOUS_PYTHON_SITE_PACKAGES=$SERIOUS_PYTHON_SITE_PACKAGES"
+      echo "SERIOUS_PYTHON_SITE_PACKAGES_DIR=$SERIOUS_PYTHON_SITE_PACKAGES_DIR"
+
+      # ------------------------------------------------------------
+      # Enter generated Flutter project
+      # ------------------------------------------------------------
+      cd "$GITHUB_WORKSPACE/build/flutter"
+
+      echo ""
+      echo "===== Flutter project ====="
+      ls -la
+
+      echo ""
+      echo "===== pubspec.yaml ====="
+      cat pubspec.yaml
+
+      # ------------------------------------------------------------
+      # Flutter dependencies
+      # ------------------------------------------------------------
+      echo ""
+      echo "===== Flutter pub get ====="
+      flutter pub get
+
+      # ------------------------------------------------------------
+      # Verify environment before Gradle
+      # ------------------------------------------------------------
+      echo ""
+      echo "===== Verify serious_python environment ====="
+
+      if [ -z "$SERIOUS_PYTHON_SITE_PACKAGES" ]; then
+        echo "ERROR: SERIOUS_PYTHON_SITE_PACKAGES is empty."
+        exit 1
+      fi
+
+      if [ ! -d "$SERIOUS_PYTHON_SITE_PACKAGES" ]; then
+        echo "ERROR: site-packages directory does not exist:"
+        echo "$SERIOUS_PYTHON_SITE_PACKAGES"
+        exit 1
+      fi
+
+      echo "OK: $SERIOUS_PYTHON_SITE_PACKAGES"
+
+      # ------------------------------------------------------------
+      # Build APK
+      # ------------------------------------------------------------
+      echo ""
+      echo "========================================"
+      echo "Building release APK"
+      echo "========================================"
+
+      flutter build apk --release --verbose
+
+  # ================================================================
+  # Final APK search
+  # ================================================================
+  - name: Find final APK
+    if: always()
+    shell: bash
+    run: |
+      echo "========================================"
+      echo "FINAL APK SEARCH"
+      echo "========================================"
+
+      APK_COUNT=$(find . \
+        -type f \
+        -name "*.apk" \
+        -not -path "./.git/*" \
+        2>/dev/null | wc -l)
+
+      echo ""
+      echo "APK count: $APK_COUNT"
+
+      if [ "$APK_COUNT" -eq 0 ]; then
+        echo ""
+        echo "ERROR: No APK was generated."
+        echo ""
+
+        echo "===== Build files ====="
+
+        find build \
+          -maxdepth 7 \
+          -type f \
+          2>/dev/null | sort | head -500 || true
+
+        echo ""
+        echo "===== Flet build log ====="
+
+        tail -500 \
+          build_logs/flet-build.log \
+          2>/dev/null || true
+
+        exit 1
+      fi
+
+      echo ""
+      echo "===== APK files ====="
+
+      find . \
+        -type f \
+        -name "*.apk" \
+        -not -path "./.git/*" \
+        -print \
+        2>/dev/null
+
+      echo ""
+      echo "===== APK sizes ====="
+
+      find . \
+        -type f \
+        -name "*.apk" \
+        -not -path "./.git/*" \
+        -exec ls -lh {} \; \
+        2>/dev/null
+
+  # ================================================================
+  # Upload APK
+  # ================================================================
+  - name: Upload APK
+    if: success()
+    uses: actions/upload-artifact@v4
+    with:
+      name: eitaa-manager-apk
+      path: |
+        **/*.apk
+      if-no-files-found: error
+      retention-days: 30
+
+  # ================================================================
+  # Upload build logs
+  # ================================================================
+  - name: Upload build logs
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: eitaa-manager-build-log
+      path: |
+        build_logs/**
+      if-no-files-found: warn
+      retention-days: 14
