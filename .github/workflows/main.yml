@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 90
 
     env:
-      FLET_CLI_NO_RICH_OUTPUT: "1"
+      NO_COLOR: "1"
       PYTHONUNBUFFERED: "1"
       PYTHONUTF8: "1"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -66,24 +66,56 @@ jobs:
           flet --version
           java -version
 
+      # ---- verify sources before building ----
+      - name: Verify sources
+        run: |
+          echo "===== repo root ====="
+          ls -la
+          echo "===== src/ ====="
+          ls -la src/
+          echo "===== assets/ ====="
+          ls -la assets/ || echo "assets/ MISSING"
+          echo "===== icon ====="
+          file assets/icon.png || echo "icon.png MISSING"
+          echo "===== python syntax check ====="
+          python -m compileall -q src/ && echo "SYNTAX OK" || echo "SYNTAX FAILED"
+
       - name: Clean build caches
         run: |
           rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.pub-cache
           rm -rf build .dart_tool .flet
           mkdir -p build_logs
 
+      # ---- build with TTY emulation so Flet prints the real error ----
       - name: Build APK
         run: |
-          set -o pipefail
-          flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
+          set +e
+          # `script` allocates a pseudo-TTY, forcing Rich to flush everything.
+          script -q -c "flet build apk --verbose" build_logs/flet-build.log
+          BUILD_EXIT=$?
+          # Strip ANSI escape codes so the log is readable.
+          if [ -f build_logs/flet-build.log ]; then
+            sed -i 's/\x1b\[[0-9;]*[a-zA-Z]//g' build_logs/flet-build.log || true
+          fi
+          echo "Flet build exit code: $BUILD_EXIT"
+          exit $BUILD_EXIT
 
-      - name: Show build log on failure
+      # ---- on failure, dump everything we can ----
+      - name: Dump full logs on failure
         if: failure()
         run: |
-          echo "=========== FULL BUILD LOG ==========="
+          echo "=========== FULL FLET LOG ==========="
           cat build_logs/flet-build.log || true
-          echo "=========== GRADLE OUTPUT ============"
-          find . -name "*.log" -path "*gradle*" -exec cat {} \; || true
+          echo ""
+          echo "=========== BUILD TREE ==========="
+          find build -maxdepth 3 -type d 2>/dev/null || true
+          echo ""
+          echo "=========== ANY .log FILES ==========="
+          find build -name "*.log" -exec echo "--- {} ---" \; -exec tail -200 {} \; 2>/dev/null || true
+          echo ""
+          echo "=========== GRADLE OUTPUT (if any) ==========="
+          find build -path "*gradle*" -name "*.log" -exec cat {} \; 2>/dev/null || true
+          find build -name "output-metadata.json" -exec cat {} \; 2>/dev/null || true
 
       - name: Find APK
         if: always()
