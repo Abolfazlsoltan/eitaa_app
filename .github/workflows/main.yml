@@ -64,8 +64,6 @@ jobs:
           ls -la
           echo "=== src/ ==="
           ls -la src/
-          echo "=== assets/ (if present) ==="
-          ls -la assets/ 2>/dev/null || echo "no assets folder"
           echo "=== pyproject.toml ==="
           cat pyproject.toml
 
@@ -75,29 +73,24 @@ jobs:
           rm -rf build .dart_tool .flet
           mkdir -p build_logs
 
-      # ---- build with correct exit code capture (no pipe) ----
       - name: Build APK
         run: |
           set +e
           flet build apk --verbose > build_logs/flet-build.log 2>&1
           BUILD_EXIT=$?
           echo "=== flet build exit code: $BUILD_EXIT ==="
-          echo "=== last 200 lines of flet log ==="
-          tail -200 build_logs/flet-build.log
+          echo "=== last 120 lines ==="
+          tail -120 build_logs/flet-build.log
 
+          # On failure, try building directly through Flutter so we can
+          # surface the real Gradle error instead of Flet's generic one.
           if [ $BUILD_EXIT -ne 0 ]; then
             echo ""
-            echo "=== flet failed — running flutter directly for real error ==="
+            echo "=== direct flutter build attempt ==="
             if [ -d build/flutter ]; then
               cd build/flutter
-              echo "--- flutter pub get ---"
-              flutter pub get 2>&1 | tail -80 || true
-              echo ""
-              echo "--- flutter build apk ---"
-              flutter build apk --release 2>&1 | tail -200 || true
-            else
-              echo "no build/flutter directory found"
-              find . -maxdepth 3 -type d | head -50
+              flutter pub get 2>&1 | tail -50 || true
+              flutter build apk --release 2>&1 | tail -150 || true
             fi
           fi
           exit $BUILD_EXIT
