@@ -1,27 +1,14 @@
-"""AI provider abstraction for the Eitaa Channel Manager backend.
+"""AI provider for the Eitaa Manager backend.
 
-Add a new provider by subclassing `AIProvider`, implementing `complete()`,
-and registering it in `PROVIDERS`. The active provider is chosen at
-runtime via the `AI_PROVIDER` environment variable (default: `"groq"`).
+Two providers are supported and can be selected at deployment time:
 
-Currently shipped providers
----------------------------
-    * GroqProvider   — Groq's OpenAI-compatible endpoint. Default.
-                       Models: llama-3.3-70b-versatile, llama-3.1-8b-instant,
-                       mixtral-8x7b-32768, gemma2-9b-it, …
-                       Docs:   https://console.groq.com/docs/openai
-    * AnthropicProvider — kept for teams that prefer Claude.
+    * groq       — default; fast, cheap, OpenAI-compatible.
+    * anthropic  — Claude models, for teams that prefer them.
 
-Environment variables
----------------------
-    AI_API_KEY   (required)  — provider API key.
-    AI_PROVIDER  (optional)  — "groq" (default) or "anthropic".
-    AI_MODEL     (optional)  — model name. Sensible default per provider.
-
-Errors
-------
-Provider failures raise `AIError` with a Persian message that is safe to
-show in the UI. The endpoint layer converts it to HTTP 502.
+Configuration (environment variables):
+    AI_API_KEY   (required)  provider key
+    AI_PROVIDER  (optional)  "groq" (default) or "anthropic"
+    AI_MODEL     (optional)  model name; sensible default per provider
 """
 
 from __future__ import annotations
@@ -33,46 +20,30 @@ from typing import Any
 import httpx
 
 
-# ============================================================== exceptions ==
-
 class AIError(Exception):
-    """Raised when an AI provider call fails. Message is user-facing."""
+    """Raised when an AI provider call fails. The message is user-facing."""
 
 
-# ================================================================ providers ==
+# ================================================================ providers
 
 class AIProvider(ABC):
-    """Base class for AI providers."""
-
-    name: str = "base"
-    default_model: str = ""
+    name = "base"
+    default_model = ""
 
     def __init__(self) -> None:
         self.api_key = (os.getenv("AI_API_KEY") or "").strip()
         self.model = (os.getenv("AI_MODEL") or self.default_model).strip()
         if not self.api_key:
-            raise AIError(
-                "کلید سرویس هوش مصنوعی تنظیم نشده است (AI_API_KEY)."
-            )
+            raise AIError("سرویس هوش مصنوعی در دسترس نیست.")
         if not self.model:
-            raise AIError(
-                "مدل هوش مصنوعی مشخص نشده است (AI_MODEL)."
-            )
+            raise AIError("مدل هوش مصنوعی انتخاب نشده است.")
 
     @abstractmethod
     async def complete(self, system: str, user: str) -> str:
         """Return the model's plain-text answer for `system` + `user`."""
 
 
-# --------------------------------------------------------------------- Groq --
-
 class GroqProvider(AIProvider):
-    """Groq — OpenAI-compatible chat completions API.
-
-    Groq is used both by the backend (this class) and directly by the client
-    in local mode (`src/local.py`). Keep the two implementations in sync.
-    """
-
     name = "groq"
     default_model = "llama-3.3-70b-versatile"
     endpoint = "https://api.groq.com/openai/v1/chat/completions"
@@ -100,32 +71,15 @@ class GroqProvider(AIProvider):
             raise AIError("ارتباط با سرویس هوش مصنوعی برقرار نشد.")
 
         if r.status_code != 200:
-            detail = ""
-            try:
-                detail = (data.get("error") or {}).get("message") or ""
-            except AttributeError:
-                pass
-            msg = "سرویس هوش مصنوعی خطا داد."
-            if detail:
-                msg += f" ({detail})"
-            raise AIError(msg)
+            raise AIError("سرویس هوش مصنوعی پاسخگو نیست.")
 
         try:
             return data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError, AttributeError):
-            raise AIError("پاسخ سرویس هوش مصنوعی نامعتبر بود.")
+            raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.")
 
-
-# ---------------------------------------------------------------- Anthropic --
 
 class AnthropicProvider(AIProvider):
-    """Anthropic Claude — Messages API.
-
-    Kept for teams that prefer Claude. Set:
-        AI_PROVIDER=anthropic
-        AI_MODEL=claude-sonnet-4-6
-    """
-
     name = "anthropic"
     default_model = "claude-sonnet-4-6"
     endpoint = "https://api.anthropic.com/v1/messages"
@@ -152,25 +106,17 @@ class AnthropicProvider(AIProvider):
             raise AIError("ارتباط با سرویس هوش مصنوعی برقرار نشد.")
 
         if r.status_code != 200:
-            detail = ""
-            try:
-                detail = (data.get("error") or {}).get("message") or ""
-            except AttributeError:
-                pass
-            msg = "سرویس هوش مصنوعی خطا داد."
-            if detail:
-                msg += f" ({detail})"
-            raise AIError(msg)
+            raise AIError("سرویس هوش مصنوعی پاسخگو نیست.")
 
         try:
             return "".join(
                 block.get("text", "") for block in data.get("content", [])
             ).strip()
         except AttributeError:
-            raise AIError("پاسخ سرویس هوش مصنوعی نامعتبر بود.")
+            raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.")
 
 
-# ================================================================== registry =
+# ================================================================== registry
 
 PROVIDERS: dict[str, type[AIProvider]] = {
     "groq": GroqProvider,
@@ -179,18 +125,14 @@ PROVIDERS: dict[str, type[AIProvider]] = {
 
 
 def get_provider() -> AIProvider:
-    """Return the provider selected by `AI_PROVIDER` (default: groq)."""
     name = (os.getenv("AI_PROVIDER") or "groq").strip().lower()
     cls = PROVIDERS.get(name)
     if cls is None:
-        raise AIError(
-            f'ارائه‌دهنده هوش مصنوعی «{name}» پشتیبانی نمی‌شود. '
-            f'گزینه‌های موجود: {", ".join(sorted(PROVIDERS))}.'
-        )
+        raise AIError("سرویس هوش مصنوعی انتخابی پشتیبانی نمی‌شود.")
     return cls()
 
 
-# ============================================================== prompt table =
+# ============================================================== prompt table
 
 SYSTEM = (
     "تو دستیار تولید محتوا برای کانال‌های ایتا هستی. "
@@ -212,4 +154,4 @@ ACTIONS: dict[str, str] = {
     "translate": "متن زیر را ترجمه کن (فارسی به انگلیسی و غیرفارسی به فارسی):",
     "summarize": "متن زیر را خلاصه کن:",
     "proofread": "غلط‌های نگارشی و املایی متن زیر را اصلاح کن و معنا را تغییر نده:",
-        }
+                       }
