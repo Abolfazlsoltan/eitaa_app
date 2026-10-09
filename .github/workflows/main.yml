@@ -5,76 +5,173 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+env:
+  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+  ANDROID_SDK_ROOT: /opt/android-sdk
+  ANDROID_HOME: /opt/android-sdk
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: 'pip'
 
-      - uses: actions/setup-java@v5
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.44.8"
           channel: stable
           cache: true
+          cache-key: flutter-${{ hashFiles('**/pubspec.lock') }}
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-            ndk;26.1.10909125
-            extras;google;google_play_services
-
-      - name: Install GTK
+      - name: Setup Android SDK Manually
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev
+          mkdir -p $ANDROID_HOME
+          cd $ANDROID_HOME
+          
+          # Download and setup command-line tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q commandlinetools-linux-11076708_latest.zip
+          rm commandlinetools-linux-11076708_latest.zip
+          
+          # Create cmdline-tools directory structure
+          mkdir -p cmdline-tools/latest
+          mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+          
+          # Update PATH
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
 
-      - name: Install Flet
+      - name: Accept Android Licenses
         run: |
-          python -m pip install --upgrade pip
+          export ANDROID_HOME=/opt/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          mkdir -p $ANDROID_HOME/licenses
+          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_HOME/licenses/android-sdk-license
+          echo -e "\n84831b9409646a918e30573bab4c9c91346d8abd" > $ANDROID_HOME/licenses/android-sdk-preview-license
+          echo -e "\nd975f751176a0ee3a07fbd8651abde99e7e1864e" > $ANDROID_HOME/licenses/android-google-usb-driver-license
+          echo -e "\n33b6a2b64607f11724f0fda7f50ff8a7a11ff2e1" > $ANDROID_HOME/licenses/google-android-media-license
+          echo -e "\ne9acab5b5fbb57fbf1fe99c186ff8529830336a3" > $ANDROID_HOME/licenses/mips-android-sysimage-license
+          
+          # Accept all licenses
+          yes | sdkmanager --licenses || true
+
+      - name: Install Android SDK Packages
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          echo "Installing SDK packages..."
+          sdkmanager --install "platforms;android-34" || true
+          sdkmanager --install "build-tools;34.0.0" || true
+          sdkmanager --install "platform-tools" || true
+          sdkmanager --install "ndk;26.1.10909125" || true
+          sdkmanager --install "cmdline-tools;latest" || true
+          
+          echo "SDK packages installed successfully"
+
+      - name: Verify Android Setup
+        run: |
+          export ANDROID_HOME=/opt/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$PATH
+          
+          echo "=== Android SDK Location ==="
+          echo $ANDROID_HOME
+          
+          echo "=== Installed Platforms ==="
+          ls -la $ANDROID_HOME/platforms/ 2>/dev/null || echo "No platforms directory"
+          
+          echo "=== Installed Build Tools ==="
+          ls -la $ANDROID_HOME/build-tools/ 2>/dev/null || echo "No build-tools directory"
+          
+          echo "=== Installed NDK ==="
+          ls -la $ANDROID_HOME/ndk/ 2>/dev/null || echo "No ndk directory"
+
+      - name: Install GTK Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libappindicator3-dev
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
           python -m pip install "flet==1.0.0"
 
-      - name: Check Flutter Doctor
+      - name: Verify Flutter Setup
         run: |
-          flutter doctor -v 2>&1 | tee doctor.log
+          flutter --version
+          flutter pub get
+          flutter doctor -v
 
       - name: Build APK
+        env:
+          ANDROID_HOME: /opt/android-sdk
+          GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
         run: |
-          flet build apk --verbose 2>&1 | tee build.log
+          export ANDROID_HOME=/opt/android-sdk
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH
+          
+          echo "Starting APK build..."
+          flet build apk --verbose 2>&1 | tee build.log || {
+            echo "Build failed, checking logs..."
+            exit 1
+          }
+
+      - name: List Build Artifacts
+        if: always()
+        run: |
+          echo "=== Searching for APK files ==="
+          find . -name "*.apk" -type f 2>/dev/null || echo "No APK files found"
+          
+          echo "=== Build directory structure ==="
+          ls -la build/ 2>/dev/null || echo "No build directory"
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: apk
+          name: apk-release
           path: "**/*.apk"
-          if-no-files-found: error
-
-      - name: Upload Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
+          retention-days: 30
           if-no-files-found: warn
 
-      - name: Upload Doctor Log
+      - name: Upload Build Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: doctor-log
-          path: doctor.log
+          name: build-logs
+          path: |
+            build.log
+            doctor.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload Gradle Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-logs
+          path: "${{ github.workspace }}/.gradle/**/*.log"
+          retention-days: 7
           if-no-files-found: warn
