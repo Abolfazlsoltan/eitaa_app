@@ -28,6 +28,9 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Install GTK
         run: |
           sudo apt-get update
@@ -38,9 +41,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "flet==1.0.0"
 
+      - name: Check Flutter Doctor
+        run: |
+          flutter doctor -v 2>&1 | tee doctor.log
+
       - name: Build APK
         run: |
-          flet build apk 2>&1 | tee build.log
+          flet build apk --verbose 2>&1 | tee build.log
 
       - name: Upload APK
         if: success()
@@ -50,10 +57,18 @@ jobs:
           path: "**/*.apk"
           if-no-files-found: error
 
-      - name: Upload log
+      - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: log
+          name: build-log
           path: build.log
+          if-no-files-found: warn
+
+      - name: Upload Doctor Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doctor-log
+          path: doctor.log
           if-no-files-found: warn
