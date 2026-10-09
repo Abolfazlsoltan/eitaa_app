@@ -5,21 +5,10 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-concurrency:
-  group: apk-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  build-apk:
-    name: Build Android APK
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-
-    env:
-      NO_COLOR: "1"
-      PYTHONUNBUFFERED: "1"
-      PYTHONUTF8: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +16,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
       - uses: actions/setup-java@v5
         with:
@@ -41,102 +28,32 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Install Linux deps
+      - name: Install GTK
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev mesa-utils pkg-config
-
-      - name: Accept licenses
-        run: yes | flutter doctor --android-licenses || true
+          sudo apt-get install -y libgtk-3-dev
 
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --upgrade setuptools wheel
-          python -m pip install "flet==1.0.3"
+          python -m pip install "flet==1.0.0"
 
-      - name: Verify Flet installation
-        run: |
-          flet --version
-          flutter doctor -v
-          python -c "import flet; print(f'Flet path: {flet.__file__}')"
-
-      - name: Clean caches
-        run: |
-          rm -rf ~/.gradle/caches ~/.gradle/wrapper ~/.pub-cache
-          rm -rf build .dart_tool .flet
-          mkdir -p build_logs
-
-      # ================================================================
-      # PASS 1 — prime the site-packages directory.
-      # flet will fail at the end (missing env var) but by then the
-      # site-packages folder already exists on disk.
-      # ================================================================
-      - name: Pass 1 - prime
-        continue-on-error: true
-        run: |
-          set +e
-          flet build apk --verbose 2>&1 | tee build_logs/flet-prime.log
-          PRIME_EXIT=$?
-          echo "prime exit: $PRIME_EXIT"
-
-      - name: Locate site-packages
-        run: |
-          set -e
-          echo "===== build tree ====="
-          find "$GITHUB_WORKSPACE/build" -maxdepth 6 -type d 2>/dev/null \
-            | sort | head -80
-
-          SP=$(find "$GITHUB_WORKSPACE/build" -type d -name "site-packages" \
-               2>/dev/null | head -1)
-
-          if [ -z "$SP" ]; then
-            echo "::error::site-packages not found after prime build"
-            cat build_logs/flet-prime.log || true
-            exit 1
-          fi
-
-          echo "Found: $SP"
-          echo "SERIOUS_PYTHON_SITE_PACKAGES=$SP"     >> "$GITHUB_ENV"
-          echo "SERIOUS_PYTHON_SITE_PACKAGES_DIR=$SP" >> "$GITHUB_ENV"
-
-      # ================================================================
-      # PASS 2 — real build.
-      # ================================================================
       - name: Build APK
         run: |
-          echo "SERIOUS_PYTHON_SITE_PACKAGES=$SERIOUS_PYTHON_SITE_PACKAGES"
-          test -d "$SERIOUS_PYTHON_SITE_PACKAGES" && echo "dir exists ✓"
+          flet build apk 2>&1 | tee build.log
 
-          set +e
-          flet build apk --verbose 2>&1 | tee build_logs/flet-build.log
-          BUILD_EXIT=$?
-          echo "exit: $BUILD_EXIT"
-          echo ""
-          echo "===== آخرین 500 خط لاگ ====="
-          tail -500 build_logs/flet-build.log
-          exit $BUILD_EXIT
-
-      - name: Find APK
-        if: always()
-        run: |
-          echo "جستجو برای فایل‌های APK..."
-          find . -type f -name "*.apk" -not -path "./.git/*" -print 2>/dev/null || true
-          find . -type f -name "*.apk" -not -path "./.git/*" \
-            -exec ls -lh {} \; 2>/dev/null || true
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload APK
         if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: eitaa-manager-apk
+          name: apk
           path: "**/*.apk"
           if-no-files-found: error
-          retention-days: 30
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload log
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: eitaa-manager-build-log
-          path: build_logs/
+          name: log
+          path: build.log
           if-no-files-found: warn
-          retention-days: 7
