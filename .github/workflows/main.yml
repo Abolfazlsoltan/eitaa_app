@@ -43,9 +43,13 @@ jobs:
         run: |
           yes | flutter doctor --android-licenses
 
+      - name: Clean build directory
+        run: |
+          flet clean
+
       - name: Build APK
         run: |
-          flet build apk --clear-cache -vv 2>&1 | tee build.log
+          flet build apk -vv 2>&1 | tee build.log
 
       - name: Upload APK
         if: success()
