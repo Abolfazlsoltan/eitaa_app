@@ -2,7 +2,7 @@
 name = "eitaa-manager"
 version = "2.0.0"
 description = "مدیریت هوشمند کانال‌های ایتا"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "flet",
     "httpx",
@@ -14,6 +14,3 @@ org = "app.eitaamanager"
 
 [tool.flet.app]
 path = "src"
-
-[tool.flet.flutter.pubspec.dependency_overrides]
-jni = "1.1.0"
