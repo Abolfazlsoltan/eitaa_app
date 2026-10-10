@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import re
 from pathlib import Path
 
 import flet as ft
 
 import config
 from api import Api, ApiError
-from fa import digits, jdate, jfull_utc, to_local, to_utc_iso
+from fa import digits, jdate
 
 
 # =================================================================== palette
@@ -40,7 +41,10 @@ class Palette:
 
 ST = {
     "draft": "پیش‌نویس",
+    "pending": "در انتظار تأیید",
+    "scheduled": "زمان‌بندی‌شده",
     "queued": "در صف",
+    "sending": "در حال ارسال",
     "published": "منتشرشده",
     "failed": "ناموفق",
     "cancelled": "لغوشده",
@@ -48,11 +52,17 @@ ST = {
 
 ST_COLOR = {
     "draft": "#94A3B8",
+    "pending": Palette.WARNING,
+    "scheduled": Palette.PRIMARY,
     "queued": Palette.WARNING,
+    "sending": Palette.WARNING,
     "published": Palette.SUCCESS,
     "failed": Palette.DANGER,
     "cancelled": "#94A3B8",
 }
+
+# Statuses for which a post can still be cancelled by the user.
+CANCELLABLE = ("draft", "pending", "scheduled", "queued")
 
 AI_ACTIONS = [
     ("create", "✨ ساخت", "ساخت پست از توضیح"),
@@ -67,6 +77,9 @@ AI_ACTIONS = [
     ("hashtags", "#️⃣ هشتگ", "پیشنهاد هشتگ"),
     ("proofread", "✓ اصلاح", "اصلاح نگارشی"),
 ]
+
+# Tabs shown in the bottom navigation bar, in order.
+NAV_VIEWS = ["home", "posts", "templates", "settings"]
 
 
 # ==================================================================== helpers
@@ -88,6 +101,7 @@ def btn_primary(text, fn, **k):
     return ft.Container(
         content=T(text, color="#FFFFFF", weight=ft.FontWeight.W_600, size=14),
         padding=ft.Padding.symmetric(horizontal=20, vertical=14),
+        alignment=ft.Alignment(0, 0),
         border_radius=14,
         gradient=ft.LinearGradient(
             colors=[Palette.PRIMARY, Palette.PRIMARY_DARK],
@@ -102,6 +116,7 @@ def btn_ghost(text, fn, **k):
     return ft.Container(
         content=T(text, color=Palette.PRIMARY, weight=ft.FontWeight.W_600, size=14),
         padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+        alignment=ft.Alignment(0, 0),
         border_radius=14,
         border=ft.Border.all(1.5, "#E2E8F0"),
         ink=True,
@@ -148,7 +163,7 @@ def pill(label, color):
 # ======================================================================= App
 
 class App:
-    def __init__(self, page: ft.Page, loop: asyncio.AbstractEventLoop):
+    def __init__(self, page: ft.Page, loop: asyncio.AbstractEventLoop, prefs):
         self.page = page
         self.loop = loop
 
@@ -158,7 +173,7 @@ class App:
         self.theme_mode = "light"
 
         self.body = ft.Container(expand=True)
-        self.api = Api(Storage(page))
+        self.api = Api(Storage(prefs))
 
     # ------------------------------------------------------------ utilities
     def spawn(self, coro):
@@ -203,22 +218,8 @@ class App:
         return await fut
 
     # ------------------------------------------------------------- surfaces
-    def _page_bg(self):
-        return ft.Container(expand=True, bgcolor=Palette.SURFACE_LIGHT)
-
     def show(self, content):
         self.body.content = content
-        self.page.update()
-
-    def shell(self, content, *, fab=None, nav=None):
-        """Wrap content in the app shell (background, safe area)."""
-        self.page.navigation_bar = nav
-        self.page.floating_action_button = fab
-        self.body.content = ft.Container(
-            content=content,
-            expand=True,
-            bgcolor=Palette.SURFACE_LIGHT,
-        )
         self.page.update()
 
     # ------------------------------------------------------- modern header
@@ -236,7 +237,6 @@ class App:
         return ft.Container(
             content=ft.Column(rows, spacing=4, tight=True),
             padding=ft.Padding.only(left=20, right=20, top=20, bottom=24),
-            margin=ft.Margin.only(bottom=-16),
             gradient=ft.LinearGradient(
                 begin=ft.Alignment.TOP_LEFT,
                 end=ft.Alignment.BOTTOM_RIGHT,
@@ -245,6 +245,16 @@ class App:
             border_radius=ft.BorderRadius.only(
                 bottom_left=28, bottom_right=28,
             ),
+        )
+
+    def _header_icon(self, icon, on_click=None):
+        return ft.Container(
+            content=ft.Icon(icon, color="#FFFFFF", size=22),
+            width=44, height=44, border_radius=14,
+            alignment=ft.Alignment(0, 0),
+            bgcolor="#FFFFFF20",
+            ink=on_click is not None,
+            on_click=on_click,
         )
 
     # =========================================================== boot flow =
@@ -270,7 +280,11 @@ class App:
             alignment=ft.Alignment(0, 0),
         ))
 
-        await self.api.bootstrap()
+        try:
+            await self.api.bootstrap()
+        except Exception:
+            # A storage hiccup must never leave the user on the splash screen.
+            pass
         await self.enter()
 
     def _logo(self, size=84):
@@ -298,9 +312,10 @@ class App:
             self.channels = []
 
         if not self.channels:
+            self.page.navigation_bar = None
+            self.page.floating_action_button = None
             return await self.onboarding()
 
-        self.page.navigation_bar = self._nav_bar(0)
         await self.go("home")
 
     def _nav_bar(self, selected: int):
@@ -326,11 +341,15 @@ class App:
         )
 
     async def go_nav(self, index: int):
-        await self.go(["home", "posts", "templates", "settings"][index])
+        await self.go(NAV_VIEWS[index])
 
-    async def go(self, name: str):
+    async def go(self, name: str, *args):
         self.view = name
         self.page.floating_action_button = self._fab_for(name)
+        # The bottom bar is a tab bar; sub-screens (e.g. "new") hide it.
+        self.page.navigation_bar = (
+            self._nav_bar(NAV_VIEWS.index(name)) if name in NAV_VIEWS else None
+        )
         self.body.content = ft.Container(
             content=ft.Column([
                 ft.ProgressRing(width=24, height=24, stroke_width=2.5,
@@ -343,10 +362,10 @@ class App:
         self.page.update()
 
         try:
-            content = await getattr(self, f"v_{name}")()
+            content = await getattr(self, f"v_{name}")(*args)
         except ApiError as e:
             content = self._error_view(str(e), name)
-        except Exception as e:
+        except Exception:
             content = self._error_view("مشکلی پیش آمد. دوباره تلاش کنید.", name)
 
         self.body.content = content
@@ -363,6 +382,8 @@ class App:
         return None
 
     def _error_view(self, message, back_to="home"):
+        # A failed sub-screen should go back to a screen that can render.
+        target = back_to if back_to in NAV_VIEWS else "home"
         return ft.Container(
             content=ft.Column([
                 ft.Container(height=80),
@@ -376,7 +397,7 @@ class App:
                   text_align=ft.TextAlign.CENTER),
                 ft.Container(height=24),
                 btn_ghost("بازگشت",
-                          lambda e: self.spawn(self.go(back_to))),
+                          lambda e: self.spawn(self.go(target))),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             padding=32,
             expand=True,
@@ -390,10 +411,16 @@ class App:
             if step["n"] < 1:
                 step["n"] += 1
                 render()
-            else:
+                return
+            try:
                 await self.api.bootstrap()
-                self.channels = await self.api.get("/channels")
+            except Exception:
+                pass
+            self.channels = await self._safe_get("/channels", [])
+            if self.channels:
                 await self.enter()
+            else:
+                self.channel_step()
 
         def render():
             views = [
@@ -447,7 +474,8 @@ class App:
                                         lambda e: self.spawn(next_step()))
                         ], alignment=ft.MainAxisAlignment.CENTER),
                     ),
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                   scroll=ft.ScrollMode.AUTO),
                 padding=32,
                 expand=True,
                 bgcolor=Palette.SURFACE_LIGHT,
@@ -456,114 +484,167 @@ class App:
 
         render()
 
+    def channel_step(self):
+        """Last onboarding screen: connect the first channel."""
+        cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
+        title = tf("نام نمایشی", hint_text="اختیاری")
+
+        async def connect(e=None):
+            if not cid.value or not cid.value.strip():
+                return self.toast("شناسه کانال را وارد کنید", error=True)
+            added = await self.guard(
+                self._add_channel(cid.value, title.value or ""))
+            if added:
+                await self.enter()
+
+        self.body.content = ft.Container(
+            content=ft.Column([
+                ft.Container(height=40),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.CAMPAIGN, size=48, color="#FFFFFF"),
+                    width=120, height=120,
+                    alignment=ft.Alignment(0, 0),
+                    border_radius=32,
+                    gradient=ft.LinearGradient(
+                        begin=ft.Alignment.TOP_LEFT,
+                        end=ft.Alignment.BOTTOM_RIGHT,
+                        colors=[Palette.ACCENT, Palette.PRIMARY],
+                    ),
+                ),
+                ft.Container(height=32),
+                T("کانالت را وصل کن", size=22, weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT, text_align=ft.TextAlign.CENTER),
+                ft.Container(height=8),
+                T("ربات باید در کانال مدیر باشد تا بتواند پست بفرستد.",
+                  size=13, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                ft.Container(height=24),
+                cid,
+                title,
+                ft.Container(height=16),
+                ft.Row([btn_primary("اتصال", lambda e: self.spawn(connect()))],
+                       alignment=ft.MainAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10,
+               scroll=ft.ScrollMode.AUTO),
+            padding=32,
+            expand=True,
+            bgcolor=Palette.SURFACE_LIGHT,
+        )
+        self.page.update()
+
+    async def _add_channel(self, value: str, title: str = ""):
+        """Add a channel through the active backend and refresh the cache."""
+        conns = await self._safe_get("/connections", [])
+        conn_id = conns[0]["id"] if conns else 1
+        added = await self.api.post("/channels", {
+            "connection_id": conn_id,
+            "value": value,
+            "title": title,
+        })
+        self.channels = await self._safe_get("/channels", self.channels)
+        return added or True
+
     # =============================================================== views =
     async def v_home(self):
         stats = await self._safe_get("/stats", {})
         posts = await self._safe_get("/posts", [])
-        activity = await self._safe_get("/activity", [])
-        channels = self.channels or await self._safe_get("/channels", [])
-        names = {c["id"]: c["title"] for c in channels}
+        self.channels = await self._safe_get("/channels", self.channels)
+        names = {c["id"]: c["title"] for c in self.channels}
 
         recent = [p for p in posts if p["status"] == "published"][:3]
 
-        return ft.Container(
-            content=ft.Column([
-                self.gradient_header(
-                    f"سلام 👋",
-                    subtitle=jdate(dt.datetime.now()),
-                    actions=[
+        children = [
+            self.gradient_header(
+                "سلام 👋",
+                subtitle=jdate(dt.datetime.now()),
+                actions=[self._header_icon(ft.Icons.CAMPAIGN)],
+            ),
+            ft.Container(height=24),
+
+            # ---- stats grid ----
+            ft.Container(
+                content=ft.Row([
+                    self._stat_tile("منتشرشده", stats.get("published", 0),
+                                    ft.Icons.CHECK_CIRCLE, Palette.SUCCESS),
+                    self._stat_tile("در صف", stats.get("queued", 0),
+                                    ft.Icons.SCHEDULE, Palette.WARNING),
+                ], spacing=12),
+                padding=ft.Padding.symmetric(horizontal=16),
+            ),
+            ft.Container(height=12),
+            ft.Container(
+                content=ft.Row([
+                    self._stat_tile("خطا", stats.get("failed", 0),
+                                    ft.Icons.ERROR_OUTLINE, Palette.DANGER),
+                    self._stat_tile("هوش مصنوعی", stats.get("ai_calls", 0),
+                                    ft.Icons.AUTO_AWESOME, Palette.PRIMARY),
+                ], spacing=12),
+                padding=ft.Padding.symmetric(horizontal=16),
+            ),
+            ft.Container(height=24),
+
+            # ---- quick action ----
+            ft.Container(
+                content=ft.Container(
+                    content=ft.Row([
+                        ft.Column([
+                            T("ایده داری؟", size=16, weight=ft.FontWeight.BOLD,
+                              color="#FFFFFF"),
+                            T("با هوش مصنوعی پست بساز", size=12,
+                              color="#FFFFFFC0"),
+                        ], spacing=2, expand=True),
                         ft.Container(
-                            content=ft.Icon(ft.Icons.CAMPAIGN, color="#FFFFFF", size=22),
-                            width=44, height=44, border_radius=14,
-                            alignment=ft.Alignment(0, 0),
-                            bgcolor="#FFFFFF20",
+                            content=ft.Icon(ft.Icons.ARROW_BACK, color="#FFFFFF",
+                                            size=22),
+                            padding=12, border_radius=12,
+                            bgcolor="#FFFFFF30",
                         ),
-                    ],
-                ),
-                ft.Container(height=24),
-
-                # ---- stats grid ----
-                ft.Container(
-                    content=ft.Row([
-                        self._stat_tile("منتشرشده", stats.get("published", 0),
-                                        ft.Icons.CHECK_CIRCLE, Palette.SUCCESS),
-                        self._stat_tile("در صف", stats.get("queued", 0),
-                                        ft.Icons.SCHEDULE, Palette.WARNING),
-                    ], spacing=12),
-                    padding=ft.Padding.symmetric(horizontal=16),
-                ),
-                ft.Container(height=12),
-                ft.Container(
-                    content=ft.Row([
-                        self._stat_tile("خطا", stats.get("failed", 0),
-                                        ft.Icons.ERROR_OUTLINE, Palette.DANGER),
-                        self._stat_tile("هوش مصنوعی", stats.get("ai_calls", 0),
-                                        ft.Icons.AUTO_AWESOME, Palette.PRIMARY),
-                    ], spacing=12),
-                    padding=ft.Padding.symmetric(horizontal=16),
-                ),
-                ft.Container(height=24),
-
-                # ---- quick action ----
-                ft.Container(
-                    content=ft.Container(
-                        content=ft.Row([
-                            ft.Column([
-                                T("ایده داری؟", size=16, weight=ft.FontWeight.BOLD,
-                                  color="#FFFFFF"),
-                                T("با هوش مصنوعی پست بساز", size=12,
-                                  color="#FFFFFFC0"),
-                            ], spacing=2, expand=True),
-                            ft.Container(
-                                content=ft.Icon(ft.Icons.ARROW_BACK, color="#FFFFFF",
-                                                size=22),
-                                padding=12, border_radius=12,
-                                bgcolor="#FFFFFF30",
-                            ),
-                        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                        padding=20,
-                        border_radius=20,
-                        gradient=ft.LinearGradient(
-                            begin=ft.Alignment.TOP_LEFT,
-                            end=ft.Alignment.BOTTOM_RIGHT,
-                            colors=[Palette.ACCENT, Palette.PRIMARY],
-                        ),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                    padding=20,
+                    border_radius=20,
+                    gradient=ft.LinearGradient(
+                        begin=ft.Alignment.TOP_LEFT,
+                        end=ft.Alignment.BOTTOM_RIGHT,
+                        colors=[Palette.ACCENT, Palette.PRIMARY],
                     ),
-                    padding=ft.Padding.symmetric(horizontal=16),
-                    on_click=lambda e: self.spawn(self.go("new")),
                 ),
-                ft.Container(height=28),
+                padding=ft.Padding.symmetric(horizontal=16),
+                on_click=lambda e: self.spawn(self.go("new")),
+            ),
+            ft.Container(height=28),
+        ]
 
-                # ---- recent posts ----
-                if recent:
+        # ---- recent posts ----
+        if recent:
+            children.append(ft.Container(
+                content=T("پست‌های اخیر", size=16,
+                          weight=ft.FontWeight.BOLD,
+                          color=Palette.TEXT_LIGHT),
+                padding=ft.Padding.only(left=20, right=20, bottom=12),
+            ))
+            children.extend(self._post_summary(p, names) for p in recent)
+            children.append(ft.Container(height=16))
+        else:
+            children.append(ft.Container(
+                content=ft.Column([
                     ft.Container(
-                        content=T("پست‌های اخیر", size=16,
-                                  weight=ft.FontWeight.BOLD,
-                                  color=Palette.TEXT_LIGHT),
-                        padding=ft.Padding.only(left=20, right=20, bottom=12),
-                    ),
-                    *[self._post_summary(p, names) for p in recent],
-                    ft.Container(height=16),
-                else:
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Container(
-                                content=ft.Icon(ft.Icons.ARTICLE_OUTLINED,
-                                                size=40, color="#CBD5E1"),
-                                alignment=ft.Alignment(0, 0),
-                            ),
-                            T("هنوز پستی منتشر نکرده‌ای", size=14,
-                              color=Palette.MUTED_LIGHT),
-                            T("از دکمه + شروع کن", size=12,
-                              color="#94A3B8"),
-                        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                           spacing=8),
-                        padding=ft.Padding.symmetric(vertical=40, horizontal=20),
+                        content=ft.Icon(ft.Icons.ARTICLE_OUTLINED,
+                                        size=40, color="#CBD5E1"),
                         alignment=ft.Alignment(0, 0),
                     ),
+                    T("هنوز پستی منتشر نکرده‌ای", size=14,
+                      color=Palette.MUTED_LIGHT),
+                    T("از دکمه + شروع کن", size=12, color="#94A3B8"),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                   spacing=8),
+                padding=ft.Padding.symmetric(vertical=40, horizontal=20),
+                alignment=ft.Alignment(0, 0),
+            ))
 
-                ft.Container(height=100),
-            ], scroll=ft.ScrollMode.AUTO, spacing=0),
+        children.append(ft.Container(height=100))
+
+        return ft.Container(
+            content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
             expand=True,
         )
 
@@ -629,63 +710,70 @@ class App:
     # ------------------------------------------------------------- posts --
     async def v_posts(self, flt: str = "all", q: str = ""):
         posts = await self._safe_get("/posts", [])
+        self.channels = await self._safe_get("/channels", self.channels)
         names = {c["id"]: c["title"] for c in self.channels}
+        needle = (q or "").strip().lower()
         filtered = [
             p for p in posts
             if (flt == "all" or p["status"] == flt)
-            and q.lower() in (p["title"] + p["text"]).lower()
+            and needle in ((p.get("title") or "") + p["text"]).lower()
         ]
 
         filters = [
             ("all", "همه"), ("draft", "پیش‌نویس"), ("queued", "در صف"),
-            ("published", "منتشرشده"), ("failed", "ناموفق"),
+            ("scheduled", "زمان‌بندی"), ("published", "منتشرشده"),
+            ("failed", "ناموفق"),
         ]
 
+        subtitle = f"{digits(len(posts))} پست"
+        if needle:
+            subtitle += f" — جستجو: «{q.strip()}»"
+
+        children = [
+            self.gradient_header(
+                "پست‌ها",
+                subtitle=subtitle,
+                actions=[self._header_icon(
+                    ft.Icons.SEARCH,
+                    lambda e: self.spawn(self._search_dialog(flt, q)),
+                )],
+            ),
+            ft.Container(height=24),
+
+            # ---- filter chips ----
+            ft.Container(
+                content=ft.Row([
+                    ft.Container(
+                        content=T(label,
+                                  size=13,
+                                  color="#FFFFFF" if flt == key else Palette.TEXT_LIGHT,
+                                  weight=ft.FontWeight.W_600),
+                        padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+                        border_radius=14,
+                        bgcolor=Palette.PRIMARY if flt == key else Palette.CARD_LIGHT,
+                        ink=True,
+                        on_click=lambda e, k=key: self.spawn(self._reload_posts(k, q)),
+                    )
+                    for key, label in filters
+                ], scroll=ft.ScrollMode.AUTO, spacing=8),
+                padding=ft.Padding.symmetric(horizontal=16),
+            ),
+            ft.Container(height=16),
+        ]
+
+        # ---- list ----
+        if filtered:
+            children.extend(self._post_card(p, names) for p in filtered)
+        else:
+            children.append(self._empty_state(
+                "پستی وجود ندارد",
+                "برای ساخت اولین پست، روی + بزن",
+                ft.Icons.ARTICLE_OUTLINED,
+            ))
+        children.append(ft.Container(height=100))
+
         return ft.Container(
-            content=ft.Column([
-                self.gradient_header(
-                    "پست‌ها",
-                    subtitle=f"{digits(len(posts))} پست",
-                    actions=[
-                        ft.Container(
-                            content=ft.Icon(ft.Icons.SEARCH, color="#FFFFFF", size=22),
-                            width=44, height=44, border_radius=14,
-                            alignment=ft.Alignment(0, 0),
-                            bgcolor="#FFFFFF20",
-                        ),
-                    ],
-                ),
-                ft.Container(height=24),
-
-                # ---- filter chips ----
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(
-                            content=T(label,
-                                      size=13,
-                                      color="#FFFFFF" if flt == key else Palette.TEXT_LIGHT,
-                                      weight=ft.FontWeight.W_600),
-                            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-                            border_radius=14,
-                            bgcolor=Palette.PRIMARY if flt == key else Palette.CARD_LIGHT,
-                            ink=True,
-                            on_click=lambda e, k=key: self.spawn(self._reload_posts(k, q)),
-                        )
-                        for key, label in filters
-                    ], scroll=ft.ScrollMode.AUTO, spacing=8),
-                    padding=ft.Padding.symmetric(horizontal=16),
-                ),
-                ft.Container(height=16),
-
-                # ---- list ----
-                *(
-                    [self._post_card(p, names) for p in filtered]
-                    or [self._empty_state("پستی وجود ندارد",
-                                          "برای ساخت اولین پست، روی + بزن",
-                                          ft.Icons.ARTICLE_OUTLINED)]
-                ),
-                ft.Container(height=100),
-            ], scroll=ft.ScrollMode.AUTO, spacing=0),
+            content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
             expand=True,
         )
 
@@ -693,51 +781,78 @@ class App:
         self.body.content = await self.v_posts(flt, q)
         self.page.update()
 
+    async def _search_dialog(self, flt, q):
+        field = tf("جستجو در پست‌ها", value=q or "", autofocus=True)
+
+        def apply(e=None):
+            self.page.pop_dialog()
+            self.spawn(self._reload_posts(flt, field.value or ""))
+
+        def clear(e=None):
+            self.page.pop_dialog()
+            self.spawn(self._reload_posts(flt, ""))
+
+        field.on_submit = apply
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("جستجو", weight=ft.FontWeight.BOLD),
+            content=field,
+            actions=[
+                ft.TextButton("پاک کردن", on_click=clear),
+                ft.FilledButton("جستجو", on_click=apply),
+            ],
+        ))
+
     def _post_card(self, post: dict, names: dict):
         status = post["status"]
         color = ST_COLOR.get(status, Palette.MUTED_LIGHT)
 
-        deliveries = post.get("deliveries", [])
         channel_rows = []
-        for d in deliveries:
-            ok = d["status"] == "published"
-            channel_rows.append(ft.Row([
-                ft.Icon(
-                    ft.Icons.CHECK_CIRCLE if ok else ft.Icons.CANCEL,
-                    size=16,
-                    color=Palette.SUCCESS if ok else Palette.DANGER,
-                ),
+        for d in post.get("deliveries", []):
+            ds = d["status"]
+            if ds == "published":
+                icon, icon_color = ft.Icons.CHECK_CIRCLE, Palette.SUCCESS
+            elif ds == "failed":
+                icon, icon_color = ft.Icons.CANCEL, Palette.DANGER
+            else:
+                icon, icon_color = ft.Icons.SCHEDULE, Palette.MUTED_LIGHT
+
+            row = [
+                ft.Icon(icon, size=16, color=icon_color),
                 T(names.get(d["channel_id"], "—"), size=12,
                   color=Palette.MUTED_LIGHT, expand=True),
-                if d.get("error"):
-                    T(d["error"], size=11, color=Palette.DANGER,
-                      max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-            ], spacing=6))
+            ]
+            if d.get("error"):
+                row.append(T(d["error"], size=11, color=Palette.DANGER,
+                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS))
+            channel_rows.append(ft.Row(row, spacing=6))
+
+        body = [
+            ft.Row([
+                T(post["title"] or "بدون عنوان", size=15,
+                  weight=ft.FontWeight.BOLD, color=Palette.TEXT_LIGHT,
+                  expand=True, max_lines=1,
+                  overflow=ft.TextOverflow.ELLIPSIS),
+                pill(ST.get(status, status), color),
+            ]),
+            T(post["text"][:100] + ("…" if len(post["text"]) > 100 else ""),
+              size=13, color=Palette.MUTED_LIGHT, max_lines=2,
+              overflow=ft.TextOverflow.ELLIPSIS),
+            *channel_rows,
+        ]
+
+        if status in CANCELLABLE:
+            body.append(ft.Row([
+                ft.TextButton(
+                    "لغو",
+                    icon=ft.Icons.CLOSE,
+                    on_click=lambda e, i=post["id"]: self.spawn(
+                        self._cancel_post(i)),
+                ),
+            ], alignment=ft.MainAxisAlignment.END))
 
         return ft.Container(
             content=ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        T(post["title"] or "بدون عنوان", size=15,
-                          weight=ft.FontWeight.BOLD, color=Palette.TEXT_LIGHT,
-                          expand=True, max_lines=1,
-                          overflow=ft.TextOverflow.ELLIPSIS),
-                        pill(ST.get(status, status), color),
-                    ]),
-                    T(post["text"][:100] + ("…" if len(post["text"]) > 100 else ""),
-                      size=13, color=Palette.MUTED_LIGHT, max_lines=2,
-                      overflow=ft.TextOverflow.ELLIPSIS),
-                    *channel_rows,
-                    if status in ("queued", "draft"):
-                        ft.Row([
-                            ft.TextButton(
-                                "لغو" if status == "queued" else "حذف",
-                                icon=ft.Icons.CLOSE,
-                                on_click=lambda e, i=post["id"]: self.spawn(
-                                    self._cancel_post(i)),
-                            ),
-                        ], alignment=ft.MainAxisAlignment.END),
-                ], spacing=8, tight=True),
+                content=ft.Column(body, spacing=8, tight=True),
                 padding=16,
                 border_radius=18,
                 bgcolor=Palette.CARD_LIGHT,
@@ -757,7 +872,15 @@ class App:
     # -------------------------------------------------------- new post -----
     async def v_new(self):
         templates = await self._safe_get("/templates", [])
-        state = {"selected": set(), "silent": False, "pin": False, "busy": False}
+        self.channels = await self._safe_get("/channels", self.channels)
+
+        # With a single channel there is nothing to choose: pre-select it.
+        state = {
+            "selected": {c["id"] for c in self.channels} if len(self.channels) == 1 else set(),
+            "silent": False,
+            "pin": False,
+            "busy": False,
+        }
 
         title = tf("عنوان پست", hint_text="اختیاری")
         text = ft.TextField(
@@ -778,15 +901,18 @@ class App:
             state["busy"] = True
             try:
                 result = await self.api.ai(
-                    action, text.value, prompt.value if action == "create" else ""
+                    action, text.value or "",
+                    (prompt.value or "") if action == "create" else "",
                 )
-                if action == "titles":
+                if action in ("titles", "hashtags"):
                     self.page.show_dialog(ft.AlertDialog(
-                        title=T("عنوان‌های پیشنهادی",
+                        title=T("عنوان‌های پیشنهادی" if action == "titles"
+                                else "هشتگ‌های پیشنهادی",
                                 weight=ft.FontWeight.BOLD),
-                        content=T(result),
-                        actions=[ft.TextButton("بستن",
-                                               on_click=lambda e: self.page.pop_dialog())],
+                        content=ft.Column([T(result, selectable=True)],
+                                          tight=True, scroll=ft.ScrollMode.AUTO),
+                        actions=[ft.TextButton(
+                            "بستن", on_click=lambda e: self.page.pop_dialog())],
                     ))
                 else:
                     text.value = result
@@ -797,13 +923,28 @@ class App:
             finally:
                 state["busy"] = False
 
+        def fill_template(tpl: dict):
+            def handler(e):
+                body = tpl.get("body", "")
+                body = body.replace("{{title}}", (title.value or "").strip())
+                body = body.replace("{{date}}", jdate(dt.datetime.now()))
+                # Placeholders the user still has to fill are dropped so they
+                # are never published literally.
+                body = re.sub(r"\{\{\w+\}\}", "", body)
+                body = re.sub(r"\n{3,}", "\n\n", body).strip()
+                text.value = body
+                self.page.update()
+            return handler
+
         def pick_channel(ch):
             def handler(e):
-                (state["selected"].add if e.control.value
-                 else state["selected"].discard)(ch["id"])
+                if e.control.value:
+                    state["selected"].add(ch["id"])
+                else:
+                    state["selected"].discard(ch["id"])
             return ft.Checkbox(
                 label=ch["title"],
-                value=False,
+                value=ch["id"] in state["selected"],
                 active_color=Palette.PRIMARY,
                 on_change=handler,
             )
@@ -811,22 +952,25 @@ class App:
         async def save(mode: str):
             if state["busy"]:
                 return
-            if not text.value.strip():
+            if not (text.value or "").strip():
                 return self.toast("متن پست را بنویسید", error=True)
             if mode == "now" and not state["selected"]:
                 return self.toast("حداقل یک کانال انتخاب کنید", error=True)
 
             state["busy"] = True
             try:
+                if mode == "now":
+                    self.toast("در حال ارسال…")
                 await self.api.post("/posts", {
-                    "title": title.value,
+                    "title": title.value or "",
                     "text": text.value,
                     "channel_ids": sorted(state["selected"]),
                     "mode": mode,
                     "silent": state["silent"],
                     "pin": state["pin"],
                 })
-                self.toast("✓ " + ("منتشر شد" if mode == "now" else "ذخیره شد"))
+                self.toast("✓ " + ("ارسال شد" if mode == "now" else "ذخیره شد"))
+                state["busy"] = False
                 await self.go("posts")
             except ApiError as e:
                 self.toast(str(e), error=True)
@@ -847,123 +991,158 @@ class App:
             for action, label, _tip in AI_ACTIONS
         ], scroll=ft.ScrollMode.AUTO, spacing=8)
 
+        # --- template chips ---
+        template_chips = ft.Row([
+            ft.Container(
+                content=T(t["name"], size=12, weight=ft.FontWeight.W_600,
+                          color=Palette.TEXT_LIGHT),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+                border_radius=12,
+                bgcolor="#F1F5F9",
+                ink=True,
+                on_click=fill_template(t),
+            )
+            for t in templates
+        ], scroll=ft.ScrollMode.AUTO, spacing=8)
+
         channel_controls = [pick_channel(c) for c in self.channels]
+
+        content_card = [title, text]
+        if templates:
+            content_card = [
+                T("قالب آماده", size=12, color=Palette.MUTED_LIGHT),
+                template_chips,
+                title,
+                text,
+            ]
+
+        form = ft.Column([
+            # --- AI section ---
+            surface_card(
+                ft.Row([
+                    ft.Container(
+                        content=ft.Icon(ft.Icons.AUTO_AWESOME,
+                                        size=20, color=Palette.PRIMARY),
+                        width=40, height=40, border_radius=12,
+                        alignment=ft.Alignment(0, 0),
+                        bgcolor=ft.Colors.with_opacity(0.12, Palette.PRIMARY),
+                    ),
+                    ft.Column([
+                        T("دستیار هوشمند", size=15,
+                          weight=ft.FontWeight.BOLD,
+                          color=Palette.TEXT_LIGHT),
+                        T("متن پست را خودکار بساز یا ویرایش کن",
+                          size=12, color=Palette.MUTED_LIGHT),
+                    ], spacing=2, expand=True),
+                ]),
+                ft.Container(height=4),
+                prompt,
+                ft.Row([
+                    btn_primary("✨ بساز",
+                                lambda e: self.spawn(run_ai("create"))),
+                ]),
+                ft.Container(height=4),
+                ai_chips,
+            ),
+
+            ft.Container(height=12),
+
+            # --- content ---
+            surface_card(*content_card),
+
+            ft.Container(height=12),
+
+            # --- channels ---
+            surface_card(
+                T("انتشار در کانال‌ها", size=15,
+                  weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                *(channel_controls or [
+                    T("هنوز کانالی متصل نشده است",
+                      size=12, color=Palette.MUTED_LIGHT),
+                ]),
+            ),
+
+            ft.Container(height=12),
+
+            # --- options ---
+            surface_card(
+                T("تنظیمات انتشار", size=15,
+                  weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                ft.Switch(
+                    label="ارسال بی‌صدا",
+                    active_color=Palette.PRIMARY,
+                    on_change=lambda e: state.__setitem__(
+                        "silent", bool(e.control.value)),
+                ),
+                ft.Switch(
+                    label="پین کردن پس از ارسال",
+                    active_color=Palette.PRIMARY,
+                    on_change=lambda e: state.__setitem__(
+                        "pin", bool(e.control.value)),
+                ),
+            ),
+
+            ft.Container(height=24),
+        ], spacing=0, scroll=ft.ScrollMode.AUTO, expand=True)
+
+        header = ft.Container(
+            content=ft.Row([
+                icon_btn(ft.Icons.ARROW_FORWARD,
+                         lambda e: self.spawn(self.go("posts")),
+                         color="#FFFFFF"),
+                T("پست جدید", size=18, weight=ft.FontWeight.BOLD,
+                  color="#FFFFFF", expand=True),
+            ]),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            gradient=ft.LinearGradient(
+                colors=[Palette.PRIMARY, Palette.PRIMARY_DARK]),
+        )
+
+        # ---- bottom action bar ----
+        action_bar = ft.Container(
+            content=ft.Row([
+                btn_ghost("ذخیره پیش‌نویس",
+                          lambda e: self.spawn(save("draft")), expand=True),
+                btn_primary("انتشار",
+                            lambda e: self.spawn(save("now")), expand=True),
+            ], spacing=12),
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            bgcolor=Palette.CARD_LIGHT,
+            shadow=ft.BoxShadow(blur_radius=20, color="#0F172A14",
+                                offset=ft.Offset(0, -4)),
+        )
 
         return ft.Container(
             content=ft.Column([
-                # header
-                ft.Container(
-                    content=ft.Row([
-                        icon_btn(ft.Icons.ARROW_FORWARD,
-                                 lambda e: self.spawn(self.go("posts")),
-                                 color="#FFFFFF"),
-                        T("پست جدید", size=18, weight=ft.FontWeight.BOLD,
-                          color="#FFFFFF", expand=True),
-                    ]),
-                    padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-                    gradient=ft.LinearGradient(
-                        colors=[Palette.PRIMARY, Palette.PRIMARY_DARK]),
-                ),
-
-                ft.Container(
-                    content=ft.Column([
-                        # --- AI section ---
-                        surface_card(
-                            ft.Row([
-                                ft.Container(
-                                    content=ft.Icon(ft.Icons.AUTO_AWESOME,
-                                                    size=20, color=Palette.PRIMARY),
-                                    width=40, height=40, border_radius=12,
-                                    alignment=ft.Alignment(0, 0),
-                                    bgcolor=ft.Colors.with_opacity(0.12, Palette.PRIMARY),
-                                ),
-                                ft.Column([
-                                    T("دستیار هوشمند", size=15,
-                                      weight=ft.FontWeight.BOLD,
-                                      color=Palette.TEXT_LIGHT),
-                                    T("متن پست را خودکار بساز یا ویرایش کن",
-                                      size=12, color=Palette.MUTED_LIGHT),
-                                ], spacing=2, expand=True),
-                            ]),
-                            ft.Container(height=4),
-                            prompt,
-                            ft.Row([
-                                btn_primary("✨ بساز",
-                                            lambda e: self.spawn(run_ai("create"))),
-                            ]),
-                            ft.Container(height=4),
-                            ai_chips,
-                        ),
-
-                        ft.Container(height=12),
-
-                        # --- content ---
-                        surface_card(
-                            title,
-                            text,
-                        ),
-
-                        ft.Container(height=12),
-
-                        # --- channels ---
-                        surface_card(
-                            T("انتشار در کانال‌ها", size=15,
-                              weight=ft.FontWeight.BOLD,
-                              color=Palette.TEXT_LIGHT),
-                            *(channel_controls or [
-                                T("هنوز کانالی متصل نشده است",
-                                  size=12, color=Palette.MUTED_LIGHT),
-                            ]),
-                        ),
-
-                        ft.Container(height=12),
-
-                        # --- options ---
-                        surface_card(
-                            T("تنظیمات انتشار", size=15,
-                              weight=ft.FontWeight.BOLD,
-                              color=Palette.TEXT_LIGHT),
-                            ft.Switch(
-                                label="ارسال بی‌صدا",
-                                active_color=Palette.PRIMARY,
-                                on_change=lambda e: state.__setitem__(
-                                    "silent", e.control.value),
-                            ),
-                            ft.Switch(
-                                label="پین کردن پس از ارسال",
-                                active_color=Palette.PRIMARY,
-                                on_change=lambda e: state.__setitem__(
-                                    "pin", e.control.value),
-                            ),
-                        ),
-
-                        ft.Container(height=100),
-                    ], spacing=0),
-                    padding=16,
-                ),
+                header,
+                ft.Container(content=form, padding=16, expand=True),
+                action_bar,
             ], spacing=0, expand=True),
-
-            # ---- bottom action bar ----
-            # (kept inside the container for a natural RTL flow)
+            expand=True,
         )
 
     # --------------------------------------------------------- templates --
     async def v_templates(self):
         templates = await self._safe_get("/templates", [])
 
-        return ft.Container(
-            content=ft.Column([
-                self.gradient_header(
-                    "قالب‌ها",
-                    subtitle="متن‌های آماده برای استفاده سریع",
-                ),
-                ft.Container(height=24),
+        children = [
+            self.gradient_header(
+                "قالب‌ها",
+                subtitle="متن‌های آماده برای استفاده سریع",
+            ),
+            ft.Container(height=24),
+        ]
+        if templates:
+            children.extend(self._template_card(t) for t in templates)
+        else:
+            children.append(self._empty_state(
+                "قالبی وجود ندارد", None, ft.Icons.FOLDER_OUTLINED))
+        children.append(ft.Container(height=100))
 
-                *[self._template_card(t) for t in templates]
-                or [self._empty_state("قالبی وجود ندارد", None,
-                                      ft.Icons.FOLDER_OUTLINED)],
-                ft.Container(height=100),
-            ], scroll=ft.ScrollMode.AUTO, spacing=0),
+        return ft.Container(
+            content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
             expand=True,
         )
 
@@ -987,6 +1166,7 @@ class App:
 
     # ---------------------------------------------------------- settings --
     async def v_settings(self):
+        self.channels = await self._safe_get("/channels", self.channels)
         channel_count = len(self.channels)
 
         return ft.Container(
@@ -1077,6 +1257,10 @@ class App:
             for c in self.channels
         ] or [T("کانالی متصل نیست", color=Palette.MUTED_LIGHT, size=13)]
 
+        def add_clicked(e):
+            self.page.pop_dialog()
+            self.spawn(self._add_channel_dialog())
+
         self.page.show_dialog(ft.BottomSheet(
             content=ft.Container(
                 content=ft.Column([
@@ -1091,10 +1275,37 @@ class App:
                     T("کانال‌های متصل", size=18, weight=ft.FontWeight.BOLD),
                     ft.Container(height=8),
                     *rows,
+                    ft.Container(height=8),
+                    ft.Row([btn_ghost("＋ افزودن کانال", add_clicked)],
+                           alignment=ft.MainAxisAlignment.CENTER),
                     ft.Container(height=20),
-                ], spacing=4, tight=True),
+                ], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO),
                 padding=20,
             ),
+        ))
+
+    async def _add_channel_dialog(self):
+        cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
+        title = tf("نام نمایشی", hint_text="اختیاری")
+
+        async def add(e=None):
+            if not (cid.value or "").strip():
+                return self.toast("شناسه کانال را وارد کنید", error=True)
+            added = await self.guard(
+                self._add_channel(cid.value, title.value or ""))
+            if added:
+                self.page.pop_dialog()
+                self.toast("✓ کانال اضافه شد")
+                await self.go("settings")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("افزودن کانال", weight=ft.FontWeight.BOLD),
+            content=ft.Column([cid, title], tight=True, spacing=10),
+            actions=[
+                ft.TextButton("لغو", on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("افزودن",
+                                on_click=lambda e: self.spawn(add())),
+            ],
         ))
 
     async def _about(self):
@@ -1117,20 +1328,23 @@ class App:
 
     # ----------------------------------------------------------- helpers --
     def _empty_state(self, title, subtitle, icon):
+        children = [
+            ft.Container(height=60),
+            ft.Container(
+                content=ft.Icon(icon, size=56, color="#CBD5E1"),
+                alignment=ft.Alignment(0, 0),
+            ),
+            ft.Container(height=20),
+            T(title, size=16, weight=ft.FontWeight.BOLD,
+              color=Palette.TEXT_LIGHT, text_align=ft.TextAlign.CENTER),
+        ]
+        if subtitle:
+            children.append(T(subtitle, size=13, color=Palette.MUTED_LIGHT,
+                              text_align=ft.TextAlign.CENTER))
         return ft.Container(
-            content=ft.Column([
-                ft.Container(height=60),
-                ft.Container(
-                    content=ft.Icon(icon, size=56, color="#CBD5E1"),
-                    alignment=ft.Alignment(0, 0),
-                ),
-                ft.Container(height=20),
-                T(title, size=16, weight=ft.FontWeight.BOLD,
-                  color=Palette.TEXT_LIGHT, text_align=ft.TextAlign.CENTER),
-                if subtitle:
-                    T(subtitle, size=13, color=Palette.MUTED_LIGHT,
-                      text_align=ft.TextAlign.CENTER),
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+            content=ft.Column(
+                children,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
             padding=32,
             alignment=ft.Alignment(0, 0),
         )
@@ -1139,26 +1353,31 @@ class App:
 # ===================================================================== Store
 
 class Storage:
-    """Async key/value storage backed by Flet's client_storage."""
+    """Async key/value storage backed by Flet's SharedPreferences service.
 
-    def __init__(self, page: ft.Page):
-        self.page = page
+    Flet 1.0 removed ``page.client_storage``; ``ft.SharedPreferences`` is its
+    replacement. Failures are swallowed on purpose: a broken store must never
+    crash the UI, the callers simply fall back to their defaults.
+    """
+
+    def __init__(self, prefs):
+        self.prefs = prefs
 
     async def get(self, key):
         try:
-            return await self.page.client_storage.get_async(key)
+            return await self.prefs.get(key)
         except Exception:
             return None
 
     async def set(self, key, value):
         try:
-            await self.page.client_storage.set_async(key, value)
+            await self.prefs.set(key, value)
         except Exception:
             pass
 
     async def remove(self, key):
         try:
-            await self.page.client_storage.remove_async(key)
+            await self.prefs.remove(key)
         except Exception:
             pass
 
@@ -1183,7 +1402,10 @@ async def main(page: ft.Page):
     except Exception:
         pass
 
-    app = App(page, loop)
+    prefs = ft.SharedPreferences()
+    page.services.append(prefs)
+
+    app = App(page, loop, prefs)
     page.add(ft.SafeArea(content=app.body, expand=True))
     await app.boot()
 
