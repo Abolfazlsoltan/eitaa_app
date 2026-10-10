@@ -23,6 +23,9 @@ jobs:
       PYTHONUNBUFFERED: "1"
       PYTHONUTF8: "1"
       GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+      # نسخه‌هایی که Gradle در لاگ واقعی build درخواست کرد.
+      NDK_VERSION: "28.2.13676358"
+      CMAKE_VERSION: "3.22.1"
 
     steps:
       - name: Checkout
@@ -76,8 +79,33 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Accept Android licenses
-        run: yes | flutter doctor --android-licenses || true
+      - name: Cache Android NDK and CMake
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/${{ env.NDK_VERSION }}
+            /usr/local/lib/android/sdk/cmake/${{ env.CMAKE_VERSION }}
+          key: android-native-${{ env.NDK_VERSION }}-${{ env.CMAKE_VERSION }}
+
+      # دانلود CMake توسط خود Gradle یک بار خراب شد («Archive is not a ZIP archive»).
+      # اینجا با sdkmanager، تایم‌اوت و چند بار تلاش مجدد از قبل نصبش می‌کنیم.
+      - name: Install Android NDK and CMake (with retries)
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKM="$(command -v sdkmanager || echo "$SDK/cmdline-tools/latest/bin/sdkmanager")"
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          for attempt in 1 2 3 4; do
+            if timeout 600 "$SDKM" --install "cmake;$CMAKE_VERSION" "ndk;$NDK_VERSION"; then
+              break
+            fi
+            echo "sdkmanager attempt $attempt failed"
+            [ "$attempt" = 4 ] && exit 1
+            rm -rf "$SDK/cmake/$CMAKE_VERSION" "$SDK/ndk/$NDK_VERSION" "$SDK/.temp"
+            sleep 20
+          done
+          "$SDK/cmake/$CMAKE_VERSION/bin/cmake" --version
 
       - name: Build APK with Flet
         shell: bash
