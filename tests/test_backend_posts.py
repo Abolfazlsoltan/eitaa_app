@@ -59,6 +59,16 @@ class PostValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
+    def test_rejects_unknown_media_asset(self):
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={"text": "draft", "media_id": 999999},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "فایل رسانه‌ای پیدا نشد.")
+
     def test_rejects_missing_channel_before_queueing(self):
         response = self.client.post(
             "/api/posts",
