@@ -22,7 +22,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete as sql_delete, func, select, update
 
 from . import ai, analytics, auth, eitaa
 from .db import (
@@ -240,6 +240,16 @@ class PostIn(BaseModel):
     repeat_count: int = 1
 
 
+class PostEditIn(BaseModel):
+    title: str = ""
+    text: str
+    channel_ids: list[int] = Field(default_factory=list)
+    mode: Literal["draft", "now", "schedule"] = "draft"
+    scheduled_at: dt.datetime | None = None
+    silent: bool = False
+    pin: bool = False
+
+
 class AIIn(BaseModel):
     action: str
     text: str = ""
@@ -371,7 +381,7 @@ def _create_post(b: PostIn) -> dict:
             raise HTTPException(400, "زمان انتشار باید در آینده باشد.")
 
     with Session() as s:
-        if b.mode != "draft":
+        if b.channel_ids:
             channel_ids = set(b.channel_ids)
             available_ids = set(s.scalars(
                 select(Channel.id).where(Channel.id.in_(channel_ids))
@@ -395,14 +405,17 @@ def _create_post(b: PostIn) -> dict:
         s.add(p)
         s.flush()
 
-        if b.mode != "draft":
-            at = scheduled_at if b.mode == "schedule" else now()
-            for cid in b.channel_ids:
-                s.add(Delivery(
-                    post_id=p.id, channel_id=cid,
-                    idem_key=f"{p.id}:{cid}", run_at=at,
-                    status="scheduled" if b.mode == "schedule" else "queued",
-                ))
+        at = scheduled_at if b.mode == "schedule" else now()
+        for cid in b.channel_ids:
+            s.add(Delivery(
+                post_id=p.id, channel_id=cid,
+                idem_key=f"{p.id}:{cid}", run_at=at,
+                status=(
+                    "draft" if b.mode == "draft"
+                    else "scheduled" if b.mode == "schedule"
+                    else "queued"
+                ),
+            ))
 
         log(s, "post", f"پست «{b.title or p.id}» ثبت شد ({b.mode})")
         s.commit()
@@ -441,6 +454,7 @@ def posts(status: str | None = None):
             out.append({
                 "id": p.id, "title": p.title, "text": p.text,
                 "status": p.status, "scheduled_at": p.scheduled_at,
+                "silent": p.silent, "pin": p.pin,
                 "deliveries": [
                     {"id": d.id, "channel_id": d.channel_id,
                      "status": d.status, "error": d.error}
@@ -448,6 +462,89 @@ def posts(status: str | None = None):
                 ],
             })
         return out
+
+
+@app.put("/api/posts/{pid}")
+def edit_post(pid: int, b: PostEditIn, request: Request):
+    if not auth.can(request.state.user.role, "edit"):
+        raise HTTPException(403, "دسترسی لازم برای ویرایش را ندارید.")
+    if b.mode != "draft" and not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای انتشار را ندارید.")
+    if not b.text.strip():
+        raise HTTPException(400, "متن پست خالی است.")
+    if len(b.channel_ids) != len(set(b.channel_ids)):
+        raise HTTPException(400, "کانال تکراری انتخاب شده است.")
+    if b.mode != "draft" and not b.channel_ids:
+        raise HTTPException(400, "حداقل یک کانال انتخاب کنید.")
+    if b.mode == "schedule" and not b.scheduled_at:
+        raise HTTPException(400, "زمان انتشار را مشخص کنید.")
+    scheduled_at = b.scheduled_at
+    if b.mode == "schedule" and scheduled_at:
+        if scheduled_at.tzinfo is not None:
+            scheduled_at = scheduled_at.astimezone(dt.timezone.utc).replace(
+                tzinfo=None
+            )
+        if scheduled_at <= now():
+            raise HTTPException(400, "زمان انتشار باید در آینده باشد.")
+    with Session() as s:
+        if b.channel_ids:
+            channel_ids = set(b.channel_ids)
+            available_ids = set(s.scalars(
+                select(Channel.id).where(Channel.id.in_(channel_ids))
+            ))
+            if available_ids != channel_ids:
+                raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
+        p = s.get(Post, pid)
+        if not p:
+            raise HTTPException(404, "پست پیدا نشد.")
+        if p.status != "draft":
+            raise HTTPException(400, "فقط پیش‌نویس را می‌توان ویرایش کرد.")
+        p.title = b.title.strip()
+        p.text = b.text.strip()
+        p.silent = b.silent
+        p.pin = b.pin
+        p.status = {
+            "draft": "draft",
+            "now": "queued",
+            "schedule": "scheduled",
+        }[b.mode]
+        p.scheduled_at = scheduled_at if b.mode == "schedule" else None
+        s.execute(sql_delete(Delivery).where(Delivery.post_id == pid))
+        run_at = scheduled_at if b.mode == "schedule" else now()
+        for cid in b.channel_ids:
+            s.add(Delivery(
+                post_id=pid,
+                channel_id=cid,
+                idem_key=f"{pid}:{cid}",
+                run_at=run_at,
+                status=(
+                    "draft" if b.mode == "draft"
+                    else "scheduled" if b.mode == "schedule"
+                    else "queued"
+                ),
+            ))
+        log(s, "post", f"پست {pid} به‌روزرسانی شد")
+        s.commit()
+        return {"id": p.id, "status": p.status}
+
+
+@app.delete("/api/posts/{pid}")
+def delete_post(pid: int, request: Request):
+    if not auth.can(request.state.user.role, "edit"):
+        raise HTTPException(403, "دسترسی لازم برای حذف را ندارید.")
+    with Session() as s:
+        p = s.get(Post, pid)
+        if not p:
+            raise HTTPException(404, "پست پیدا نشد.")
+        if p.status != "draft":
+            raise HTTPException(
+                400, "حذف از کانال یا سوابق پست منتشرشده از این API پشتیبانی نمی‌شود."
+            )
+        s.execute(sql_delete(Delivery).where(Delivery.post_id == pid))
+        s.delete(p)
+        log(s, "post", f"پیش‌نویس {pid} حذف شد")
+        s.commit()
+        return {"ok": True}
 
 
 @app.post("/api/deliveries/{did}/retry")
@@ -1022,6 +1119,7 @@ RULES = [
     (("GET", "POST", "DELETE"), r"^/api/team", "owner"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
+    (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
     (("POST",), r"^/api/posts/\d+/(approve|reject)", "approve"),
     (("POST", "DELETE"), r"^/api/(templates|media|automations|ai)", "edit"),

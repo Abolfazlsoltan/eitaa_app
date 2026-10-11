@@ -163,6 +163,90 @@ class PostValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "زمان انتشار باید در آینده باشد.")
 
+    def test_owner_can_edit_and_delete_draft(self):
+        created = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={"title": "draft", "text": "before"},
+        )
+        self.assertEqual(created.status_code, 200)
+        post_id = created.json()["id"]
+
+        edited = self.client.put(
+            f"/api/posts/{post_id}",
+            headers=self.headers,
+            json={"title": "edited", "text": "after"},
+        )
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.json()["status"], "draft")
+        posts = self.client.get("/api/posts", headers=self.headers).json()
+        stored = next(post for post in posts if post["id"] == post_id)
+        self.assertEqual(stored["title"], "edited")
+        self.assertEqual(stored["text"], "after")
+
+        deleted = self.client.delete(
+            f"/api/posts/{post_id}", headers=self.headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
+        posts = self.client.get("/api/posts", headers=self.headers).json()
+        self.assertFalse(any(post["id"] == post_id for post in posts))
+
+    def test_draft_can_be_published_after_editing(self):
+        created = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "title": "publish later",
+                "text": "draft text",
+                "channel_ids": [self.channel_id],
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        post_id = created.json()["id"]
+
+        posts = self.client.get("/api/posts", headers=self.headers).json()
+        draft = next(post for post in posts if post["id"] == post_id)
+        self.assertEqual(draft["deliveries"][0]["channel_id"], self.channel_id)
+        self.assertEqual(draft["deliveries"][0]["status"], "draft")
+
+        published = self.client.put(
+            f"/api/posts/{post_id}",
+            headers=self.headers,
+            json={
+                "title": "publish later",
+                "text": "edited text",
+                "channel_ids": [self.channel_id],
+                "mode": "now",
+            },
+        )
+        self.assertEqual(published.status_code, 200)
+        self.assertEqual(published.json()["status"], "queued")
+
+    def test_published_post_cannot_be_edited_or_deleted_as_a_draft(self):
+        created = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "title": "queued post",
+                "text": "published content",
+                "mode": "now",
+                "channel_ids": [self.channel_id],
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        post_id = created.json()["id"]
+
+        edited = self.client.put(
+            f"/api/posts/{post_id}",
+            headers=self.headers,
+            json={"title": "changed", "text": "changed"},
+        )
+        self.assertEqual(edited.status_code, 400)
+        deleted = self.client.delete(
+            f"/api/posts/{post_id}", headers=self.headers,
+        )
+        self.assertEqual(deleted.status_code, 400)
+
     def test_rejects_upload_over_configured_limit(self):
         with patch("backend.main.MAX_UPLOAD", 4):
             response = self.client.post(

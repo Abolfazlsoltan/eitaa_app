@@ -167,13 +167,15 @@ class App:
         self.page = page
         self.loop = loop
 
-        self.me: dict = {"id": 0, "name": "کاربر", "role": "owner"}
+        self.me: dict = {"name": "محلی", "role": "local"}
         self.channels: list = []
         self.view = "home"
         self.theme_mode = "light"
 
         self.body = ft.Container(expand=True)
         self.api = Api(Storage(prefs))
+        self.server_base = self.api.base
+        self.api.on_unauthorized = lambda: self.spawn(self._session_expired())
 
     # ------------------------------------------------------------ utilities
     def spawn(self, coro):
@@ -282,9 +284,18 @@ class App:
 
         try:
             await self.api.bootstrap()
+        except ApiError as e:
+            return self.show(self._error_view(str(e), "home"))
         except Exception:
-            # A storage hiccup must never leave the user on the splash screen.
-            pass
+            return self.show(self._error_view(
+                "ذخیره‌سازی برنامه در دسترس نیست. دوباره تلاش کنید.", "home"
+            ))
+        if self.api.online:
+            try:
+                state = await self.api.auth_state()
+            except ApiError as e:
+                return self.show(self._auth_unavailable(str(e)))
+            return await self.go("auth", not state.get("has_users", False))
         await self.enter()
 
     def _logo(self, size=84):
@@ -306,6 +317,8 @@ class App:
 
     # ========================================================== main shell =
     async def enter(self):
+        if self.api.online and not self.api.token:
+            return await self.go("auth", True)
         try:
             self.channels = await self.api.get("/channels")
         except ApiError:
@@ -317,6 +330,115 @@ class App:
             return await self.onboarding()
 
         await self.go("home")
+
+    async def _session_expired(self):
+        self.api.logout()
+        self.me = {"name": "محلی", "role": "local"}
+        self.toast("نشست شما منقضی شده است؛ دوباره وارد شوید.", error=True)
+        try:
+            state = await self.api.auth_state()
+        except ApiError as e:
+            return self.show(self._auth_unavailable(str(e)))
+        await self.go("auth", not state.get("has_users", False))
+
+    def _auth_unavailable(self, message):
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(height=56),
+                self._logo(80),
+                T("اتصال به سرور برقرار نشد", size=20,
+                  weight=ft.FontWeight.BOLD, color=Palette.TEXT_LIGHT),
+                T(message, size=13, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                btn_primary(
+                    "تلاش دوباره برای اتصال",
+                    lambda e: self.spawn(self._retry_backend()),
+                ),
+                btn_ghost(
+                    "ادامه در حالت محلی",
+                    lambda e: self.spawn(self._continue_offline()),
+                ),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=18),
+            padding=24,
+            expand=True,
+            bgcolor=Palette.SURFACE_LIGHT,
+        )
+
+    async def _retry_backend(self):
+        self.api.set_backend(self.server_base)
+        await self.boot()
+
+    async def _continue_offline(self):
+        self.api.set_backend("")
+        self.me = {"name": "محلی", "role": "local"}
+        try:
+            await self.api.bootstrap()
+        except ApiError as exc:
+            return self.show(self._error_view(str(exc), "home"))
+        await self.enter()
+
+    async def v_auth(self, register: bool = False):
+        username = tf("نام کاربری", autofocus=True)
+        display_name = tf("نام نمایشی", hint_text="اختیاری")
+        password = tf("رمز عبور", password=True, can_reveal_password=True)
+        busy = {"value": False}
+
+        async def submit(e=None):
+            if busy["value"]:
+                return
+            name = (username.value or "").strip()
+            secret = password.value or ""
+            if not name or not secret:
+                return self.toast("نام کاربری و رمز عبور را وارد کنید.", error=True)
+            busy["value"] = True
+            try:
+                if register:
+                    self.me = await self.api.register(
+                        name, secret, (display_name.value or "").strip()
+                    )
+                else:
+                    self.me = await self.api.login(name, secret)
+                password.value = ""
+                await self.enter()
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+            finally:
+                busy["value"] = False
+
+        password.on_submit = submit
+        fields = [username]
+        if register:
+            fields.append(display_name)
+        fields.append(password)
+        heading = "ساخت حساب مالک" if register else "ورود به فضای کاری"
+        action = "ثبت‌نام" if register else "ورود"
+        return ft.Container(
+            content=ft.Column([
+                ft.Container(height=36),
+                self._logo(84),
+                T(heading, size=22, weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                T(
+                    "حساب مالک را برای این سرور بسازید."
+                    if register else "برای ادامه به سرور امن متصل شوید.",
+                    size=13, color=Palette.MUTED_LIGHT,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                surface_card(
+                    *fields,
+                    T("رمز عبور حداقل ۸ نویسه باشد.",
+                      size=11, color=Palette.MUTED_LIGHT),
+                    btn_primary(action, lambda e: self.spawn(submit())),
+                ),
+                T("نشست فقط تا زمان بسته‌بودن برنامه در حافظه می‌ماند.",
+                  size=11, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+               spacing=16, scroll=ft.ScrollMode.AUTO),
+            padding=24,
+            expand=True,
+            bgcolor=Palette.SURFACE_LIGHT,
+        )
 
     def _nav_bar(self, selected: int):
         return ft.NavigationBar(
@@ -488,13 +610,28 @@ class App:
         """Last onboarding screen: connect the first channel."""
         cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
         title = tf("نام نمایشی", hint_text="اختیاری")
+        bot_token = ft.TextField(
+            label="توکن ایتایار (در صورت نیاز)",
+            hint_text="توکن جدید را فقط اگر اتصالی ندارید وارد کنید",
+            password=True,
+            can_reveal_password=True,
+            border_radius=14,
+        )
 
         async def connect(e=None):
             if not cid.value or not cid.value.strip():
                 return self.toast("شناسه کانال را وارد کنید", error=True)
-            added = await self.guard(
-                self._add_channel(cid.value, title.value or ""))
-            if added:
+            try:
+                if (bot_token.value or "").strip():
+                    await self.api.post("/connections", {
+                        "name": "اتصال اصلی",
+                        "token": bot_token.value.strip(),
+                    })
+                    bot_token.value = ""
+                await self._add_channel(cid.value, title.value or "")
+            except ApiError as exc:
+                return self.toast(str(exc), error=True)
+            else:
                 await self.enter()
 
         self.body.content = ft.Container(
@@ -518,12 +655,20 @@ class App:
                 T("ربات باید در کانال مدیر باشد تا بتواند پست بفرستد.",
                   size=13, color=Palette.MUTED_LIGHT,
                   text_align=ft.TextAlign.CENTER),
+                T("اگر هنوز اتصال ایتایار ندارید، توکن را از راهنمای رسمی "
+                  "دریافت و در کادر زیر وارد کنید.",
+                  size=12, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
                 ft.Container(height=24),
+                bot_token,
                 cid,
                 title,
                 ft.Container(height=16),
-                ft.Row([btn_primary("اتصال", lambda e: self.spawn(connect()))],
-                       alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row([
+                    btn_ghost("ادامه بدون اتصال",
+                              lambda e: self.spawn(self.go("home"))),
+                    btn_primary("اتصال", lambda e: self.spawn(connect())),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=10,
                scroll=ft.ScrollMode.AUTO),
             padding=32,
@@ -777,6 +922,60 @@ class App:
             expand=True,
         )
 
+    async def v_channel_history(self, channel_id: int):
+        try:
+            posts = await self.api.get("/posts")
+            channels = await self.api.get("/channels")
+        except ApiError as exc:
+            return self._error_view(str(exc), "settings")
+        channel = next(
+            (item for item in channels if item.get("id") == channel_id), None
+        )
+        if channel is None:
+            return self._error_view("کانال پیدا نشد.", "settings")
+        self.channels = channels
+        history = [
+            post for post in posts
+            if any(
+                delivery.get("channel_id") == channel_id
+                and delivery.get("status") == "published"
+                for delivery in post.get("deliveries", [])
+            )
+        ]
+        children = [
+            self.gradient_header(
+                channel["title"],
+                subtitle="پیام‌های منتشرشده از طریق این برنامه",
+                actions=[self._header_icon(
+                    ft.Icons.ARROW_FORWARD,
+                    lambda e: self.spawn(self.go("settings")),
+                )],
+            ),
+            ft.Container(
+                content=surface_card(
+                    T("این فهرست فقط سوابق ثبت‌شده در برنامه را نشان می‌دهد. "
+                      "تاریخچه کامل پیام‌های قبلی کانال از ایتا دریافت نمی‌شود.",
+                      size=12, color=Palette.MUTED_LIGHT),
+                ),
+                padding=16,
+            ),
+        ]
+        if history:
+            children.extend(
+                self._post_card(post, {channel_id: channel["title"]})
+                for post in history
+            )
+        else:
+            children.append(self._empty_state(
+                "ارسال ثبت‌شده‌ای نیست",
+                "این صفحه فقط پیام‌هایی را نشان می‌دهد که برنامه منتشر کرده است.",
+                ft.Icons.HISTORY,
+            ))
+        return ft.Container(
+            content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
+            expand=True,
+        )
+
     async def _reload_posts(self, flt, q):
         self.body.content = await self.v_posts(flt, q)
         self.page.update()
@@ -840,13 +1039,28 @@ class App:
             *channel_rows,
         ]
 
-        if status in CANCELLABLE:
+        if status in CANCELLABLE and status != "draft":
             body.append(ft.Row([
                 ft.TextButton(
                     "لغو",
                     icon=ft.Icons.CLOSE,
                     on_click=lambda e, i=post["id"]: self.spawn(
                         self._cancel_post(i)),
+                ),
+            ], alignment=ft.MainAxisAlignment.END))
+        elif status == "draft":
+            body.append(ft.Row([
+                ft.TextButton(
+                    "ویرایش",
+                    icon=ft.Icons.EDIT_OUTLINED,
+                    on_click=lambda e, i=post["id"]: self.spawn(
+                        self.go("new", i)),
+                ),
+                ft.TextButton(
+                    "حذف پیش‌نویس",
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    on_click=lambda e, i=post["id"]: self.spawn(
+                        self._delete_draft(i)),
                 ),
             ], alignment=ft.MainAxisAlignment.END))
 
@@ -869,23 +1083,49 @@ class App:
             self.toast("✓ لغو شد")
             await self.go("posts")
 
+    async def _delete_draft(self, post_id: int):
+        if not await self.confirm("این پیش‌نویس حذف شود؟"):
+            return
+        try:
+            await self.api.delete(f"/posts/{post_id}")
+        except ApiError as exc:
+            return self.toast(str(exc), error=True)
+        self.toast("پیش‌نویس حذف شد.")
+        await self.go("posts")
+
     # -------------------------------------------------------- new post -----
-    async def v_new(self):
+    async def v_new(self, post_id: int | None = None):
+        post = None
+        if post_id is not None:
+            posts = await self.api.get("/posts")
+            post = next((p for p in posts if p.get("id") == post_id), None)
+            if post is None or post.get("status") != "draft":
+                return self._error_view("فقط پیش‌نویس موجود را می‌توان ویرایش کرد.")
         templates = await self._safe_get("/templates", [])
         self.channels = await self._safe_get("/channels", self.channels)
 
         # With a single channel there is nothing to choose: pre-select it.
+        draft_channel_ids = {
+            delivery.get("channel_id")
+            for delivery in (post or {}).get("deliveries", [])
+        }
         state = {
-            "selected": {c["id"] for c in self.channels} if len(self.channels) == 1 else set(),
-            "silent": False,
-            "pin": False,
+            "selected": (
+                draft_channel_ids
+                or ({c["id"] for c in self.channels}
+                    if len(self.channels) == 1 else set())
+            ),
+            "silent": bool((post or {}).get("silent")),
+            "pin": bool((post or {}).get("pin")),
             "busy": False,
         }
 
-        title = tf("عنوان پست", hint_text="اختیاری")
+        title = tf("عنوان پست", hint_text="اختیاری",
+                   value=post.get("title", "") if post else "")
         text = ft.TextField(
             label="متن پست",
             hint_text="متن خود را اینجا بنویسید…",
+            value=post.get("text", "") if post else "",
             multiline=True,
             min_lines=8,
             max_lines=20,
@@ -1001,11 +1241,14 @@ class App:
                 }
                 if scheduled_at:
                     payload["scheduled_at"] = scheduled_at
-                await self.api.post("/posts", payload)
+                if post is None:
+                    await self.api.post("/posts", payload)
+                else:
+                    await self.api.put(f"/posts/{post_id}", payload)
                 success = {
                     "now": "درخواست انتشار ثبت شد",
                     "schedule": "زمان‌بندی ثبت شد",
-                    "draft": "پیش‌نویس ذخیره شد",
+                    "draft": "تغییرات پیش‌نویس ذخیره شد" if post else "پیش‌نویس ذخیره شد",
                 }[mode]
                 self.toast("✓ " + success)
                 state["busy"] = False
@@ -1142,7 +1385,8 @@ class App:
                 icon_btn(ft.Icons.ARROW_FORWARD,
                          lambda e: self.spawn(self.go("posts")),
                          color="#FFFFFF"),
-                T("پست جدید", size=18, weight=ft.FontWeight.BOLD,
+                T("ویرایش پیش‌نویس" if post else "پست جدید",
+                  size=18, weight=ft.FontWeight.BOLD,
                   color="#FFFFFF", expand=True),
             ]),
             padding=ft.Padding.symmetric(horizontal=12, vertical=8),
@@ -1152,16 +1396,33 @@ class App:
 
         # ---- bottom action bar ----
         action_bar = ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    btn_ghost("ذخیره پیش‌نویس",
-                              lambda e: self.spawn(save("draft")), expand=True),
-                    btn_ghost("زمان‌بندی",
-                              lambda e: self.spawn(save("schedule")), expand=True),
-                ], spacing=12),
-                btn_primary("انتشار",
-                            lambda e: self.spawn(save("now")), expand=True),
-            ], spacing=8),
+            content=(
+                ft.Column([
+                    ft.Row([
+                        btn_ghost("ذخیره پیش‌نویس",
+                                  lambda e: self.spawn(save("draft")),
+                                  expand=True),
+                        btn_primary("انتشار",
+                                    lambda e: self.spawn(save("now")),
+                                    expand=True),
+                    ], spacing=12),
+                    *([btn_ghost(
+                        "زمان‌بندی",
+                        lambda e: self.spawn(save("schedule")),
+                        expand=True,
+                    )] if self.api.online else []),
+                ], spacing=8)
+                if post else ft.Column([
+                    ft.Row([
+                        btn_ghost("ذخیره پیش‌نویس",
+                                  lambda e: self.spawn(save("draft")), expand=True),
+                        btn_ghost("زمان‌بندی",
+                                  lambda e: self.spawn(save("schedule")), expand=True),
+                    ], spacing=12),
+                    btn_primary("انتشار",
+                                lambda e: self.spawn(save("now")), expand=True),
+                ], spacing=8)
+            ),
             padding=ft.Padding.symmetric(horizontal=16, vertical=12),
             bgcolor=Palette.CARD_LIGHT,
             shadow=ft.BoxShadow(blur_radius=20, color="#0F172A14",
@@ -1244,10 +1505,17 @@ class App:
                                     colors=[Palette.ACCENT, Palette.PRIMARY]),
                             ),
                             ft.Column([
-                                T("کاربر", size=16,
+                                T(
+                                    (self.me or {}).get("name")
+                                    or (self.me or {}).get("username")
+                                    or "حساب کاربری",
+                                    size=16,
                                   weight=ft.FontWeight.BOLD,
                                   color=Palette.TEXT_LIGHT),
-                                T(f"{digits(channel_count)} کانال متصل",
+                                T(
+                                    "حساب متصل به سرور"
+                                    if self.api.online and self.me
+                                    else "حالت محلی — ورود به سرور در دسترس نیست",
                                   size=12, color=Palette.MUTED_LIGHT),
                             ], spacing=2, expand=True),
                         ], spacing=14),
@@ -1263,6 +1531,22 @@ class App:
                                        f"{digits(channel_count)} کانال",
                                        lambda e: self.spawn(self._channels_sheet())),
                         ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.AUTO_AWESOME_OUTLINED,
+                                       "هوش مصنوعی",
+                                       "انتخاب سرویس، مدل و کلید",
+                                       lambda e: self.spawn(self.go("ai"))),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.HELP_OUTLINE,
+                                       "راهنمای اتصال",
+                                       "افزودن کانال و دریافت توکن",
+                                       lambda e: self.spawn(self.go("help"))),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.LOGOUT,
+                                       "خروج از حساب",
+                                       "پایان نشست سرور",
+                                       lambda e: self.spawn(self._logout()),
+                                       disabled=not bool(self.api.token)),
+                        ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.INFO_OUTLINE, "درباره برنامه",
                                        f"نسخه {digits(config.VERSION)}",
                                        lambda e: self.spawn(self._about())),
@@ -1275,7 +1559,7 @@ class App:
             expand=True,
         )
 
-    def _menu_row(self, icon, title, subtitle, on_click):
+    def _menu_row(self, icon, title, subtitle, on_click, disabled=False):
         return ft.Container(
             content=ft.Row([
                 ft.Container(
@@ -1292,9 +1576,238 @@ class App:
                 ft.Icon(ft.Icons.CHEVRON_LEFT, color="#CBD5E1", size=20),
             ], spacing=14),
             padding=ft.Padding.symmetric(vertical=12),
-            ink=True,
-            on_click=on_click,
+            ink=not disabled,
+            on_click=None if disabled else on_click,
+            opacity=0.5 if disabled else 1,
         )
+
+    async def v_ai_settings(self):
+        if self.api.online:
+            async def test_server_ai():
+                try:
+                    await self.api.ai("proofread", "سلام")
+                except ApiError as exc:
+                    self.toast(str(exc), error=True)
+                else:
+                    self.toast("اتصال هوش مصنوعی سرور برقرار است.")
+
+            return ft.Container(
+                content=ft.Column([
+                    self.gradient_header("هوش مصنوعی",
+                                         subtitle="تنظیمات سرویس"),
+                    ft.Container(
+                        content=surface_card(ft.Column([
+                            T("تنظیمات AI در سرور مدیریت می‌شود",
+                              size=16, weight=ft.FontWeight.BOLD),
+                            T("کلید و ارائه‌دهنده را مدیر سرور تنظیم می‌کند. "
+                              "این دستگاه کلید جداگانه‌ای برای درخواست‌های "
+                              "سرور ذخیره نمی‌کند.",
+                              size=13, color=Palette.MUTED_LIGHT),
+                            btn_primary(
+                                "آزمایش اتصال",
+                                lambda e: self.spawn(test_server_ai()),
+                                expand=True,
+                            ),
+                        ], spacing=14)),
+                        padding=16,
+                    ),
+                ], scroll=ft.ScrollMode.AUTO),
+                expand=True,
+            )
+
+        settings = await self.api.ai_settings()
+        provider = ft.Dropdown(
+            label="ارائه‌دهنده",
+            value=settings["provider"],
+            options=[
+                ft.dropdown.Option("groq", "Groq"),
+                ft.dropdown.Option("openai", "OpenAI یا سازگار"),
+                ft.dropdown.Option("gemini", "Google Gemini"),
+                ft.dropdown.Option("anthropic", "Anthropic Claude"),
+            ],
+            border_radius=14,
+        )
+        model = tf("مدل", value=settings["model"],
+                   hint_text="نام مدل ارائه‌دهنده")
+        model_defaults = {
+            "groq": config.GROQ_MODEL or "llama-3.3-70b-versatile",
+            "openai": "gpt-4o-mini",
+            "gemini": "gemini-2.5-flash",
+            "anthropic": "claude-sonnet-4-6",
+        }
+        selected_provider = {"value": provider.value}
+        model_values = {provider.value: model.value}
+        base_url = tf(
+            "نشانی API سازگار",
+            value=settings.get("base_url", ""),
+            hint_text="فقط برای OpenAI یا سرویس سازگار؛ HTTPS",
+            keyboard_type=ft.KeyboardType.URL,
+            disabled=provider.value != "openai",
+        )
+
+        key_field = ft.TextField(
+            label="کلید API جدید",
+            hint_text="کلید موجود جایگزین نمی‌شود",
+            password=True,
+            can_reveal_password=True,
+            border_radius=14,
+            disabled=settings["has_key"],
+        )
+        key_status = T(
+            "کلید از قبل پیکربندی شده است؛ مقدار آن نمایش یا جایگزین نمی‌شود."
+            if settings["has_key"] else "هنوز کلیدی ذخیره نشده است.",
+            size=12, color=Palette.MUTED_LIGHT,
+        )
+
+        async def provider_changed(e):
+            model_values[selected_provider["value"]] = model.value
+            selected_provider["value"] = provider.value
+            model.value = model_values.get(
+                provider.value, model_defaults[provider.value]
+            )
+            base_url.disabled = provider.value != "openai"
+            has_key = await self.api.ai_key_configured(provider.value)
+            key_field.disabled = has_key
+            key_status.value = (
+                "کلید از قبل پیکربندی شده است؛ مقدار آن نمایش یا جایگزین نمی‌شود."
+                if has_key else "برای این ارائه‌دهنده هنوز کلیدی ثبت نشده است."
+            )
+            self.page.update()
+
+        provider.on_change = provider_changed
+
+        async def save_settings(show_toast=True):
+            try:
+                await self.api.save_ai_settings(
+                    provider=provider.value or "groq",
+                    model=(model.value or "").strip(),
+                    key=key_field.value or "",
+                    base_url=(base_url.value or "").strip(),
+                )
+            except (ApiError, ValueError) as exc:
+                self.toast(str(exc), error=True)
+                return False
+            key_field.value = ""
+            has_key = await self.api.ai_key_configured(provider.value)
+            key_field.disabled = has_key
+            key_status.value = (
+                "کلید پیکربندی شده است؛ مقدار آن نمایش داده نمی‌شود."
+                if has_key else "تنظیمات ذخیره شد؛ هنوز کلیدی ثبت نشده است."
+            )
+            self.page.update()
+            if show_toast:
+                self.toast("تنظیمات هوش مصنوعی ذخیره شد.")
+            return True
+
+        async def test_connection():
+            if not await save_settings(show_toast=False):
+                return
+            try:
+                await self.api.ai("proofread", "سلام")
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+            else:
+                self.toast("اتصال هوش مصنوعی برقرار است.")
+
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header("هوش مصنوعی",
+                                     subtitle="مدیریت ارائه‌دهنده و کلید"),
+                ft.Container(
+                    content=surface_card(ft.Column([
+                        T("کلید در تنظیمات محلی دستگاه ذخیره می‌شود؛ "
+                          "این ذخیره‌سازی گاوصندوق رمزگذاری‌شده نیست.",
+                          size=12, color=Palette.MUTED_LIGHT),
+                        provider, model, base_url, key_field, key_status,
+                        ft.Row([
+                            btn_ghost("ذخیره",
+                                      lambda e: self.spawn(save_settings()),
+                                      expand=True),
+                            btn_primary(
+                                "ذخیره و آزمایش",
+                                lambda e: self.spawn(test_connection()),
+                                expand=True,
+                            ),
+                        ], spacing=10),
+                        ft.TextButton(
+                            "دریافت کلید از وب‌سایت رسمی",
+                            icon=ft.Icons.OPEN_IN_NEW,
+                            on_click=lambda e: self._open_ai_provider(
+                                provider.value),
+                        ),
+                    ], spacing=12)),
+                    padding=16,
+                ),
+            ], scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
+
+    def _open_ai_provider(self, provider):
+        urls = {
+            "groq": "https://console.groq.com/keys",
+            "openai": "https://platform.openai.com/api-keys",
+            "gemini": "https://aistudio.google.com/app/apikey",
+            "anthropic": "https://console.anthropic.com/settings/keys",
+        }
+        self.page.launch_url(urls.get(provider, urls["groq"]))
+
+    async def v_help(self):
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header("راهنمای اتصال",
+                                     subtitle="کانال و ایتایار"),
+                ft.Container(
+                    content=surface_card(ft.Column([
+                        T("۱. ساخت توکن ایتایار", size=16,
+                          weight=ft.FontWeight.BOLD),
+                        T("از وب‌سایت رسمی ایتایار وارد حساب شوید و برای "
+                          "ربات خود توکن بسازید. توکن را فقط داخل برنامه "
+                          "وارد کنید و برای دیگران نفرستید.",
+                          size=13, color=Palette.MUTED_LIGHT),
+                        ft.TextButton(
+                            "باز کردن ایتایار",
+                            icon=ft.Icons.OPEN_IN_NEW,
+                            on_click=lambda e: self.page.launch_url(
+                                "https://eitaayar.ir/"),
+                        ),
+                        T("۲. افزودن کانال", size=16,
+                          weight=ft.FontWeight.BOLD),
+                        T("در تنظیمات ← کانال‌های من، ابتدا «افزودن ربات "
+                          "ایتایار» را بزنید و توکن را ثبت کنید؛ سپس «افزودن "
+                          "کانال» را انتخاب و شناسه را وارد کنید. ربات را "
+                          "طبق دستورهای رسمی به کانال اضافه کنید و دسترسی "
+                          "ارسال پیام بدهید. توکن بررسی می‌شود؛ دسترسی کانال "
+                          "هنگام ارسال واقعی مشخص خواهد شد.",
+                          size=13, color=Palette.MUTED_LIGHT),
+                        T("۳. سوابق پیام", size=16,
+                          weight=ft.FontWeight.BOLD),
+                        T("فهرست پیام‌ها فقط سوابقی را نشان می‌دهد که خود "
+                          "برنامه منتشر و ثبت کرده است. دریافت همه پیام‌های "
+                          "قدیمی کانال و ویرایش یا حذف پیام منتشرشده با API "
+                          "فعلی ایتایار پشتیبانی نمی‌شود.",
+                          size=13, color=Palette.MUTED_LIGHT),
+                        T("۴. ورود و همگام‌سازی", size=16,
+                          weight=ft.FontWeight.BOLD),
+                        T("ورود و ثبت‌نام نیازمند سرور فعال است. در حالت "
+                          "محلی، پیش‌نویس‌ها و تنظیمات دستگاه در دسترس‌اند؛ "
+                          "همگام‌سازی سرور اعلام نمی‌شود.",
+                          size=13, color=Palette.MUTED_LIGHT),
+                    ], spacing=12)),
+                    padding=16,
+                ),
+            ], scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
+
+    async def _logout(self):
+        if not self.api.token:
+            self.toast("نشستی برای خروج وجود ندارد.", error=True)
+            return
+        if not await self.confirm("از حساب سرور خارج شوید؟"):
+            return
+        self.api.logout()
+        self.me = None
+        await self.go("auth")
 
     async def _channels_sheet(self):
         rows = [
@@ -1307,6 +1820,9 @@ class App:
                 ),
                 title=T(c["title"], size=14, weight=ft.FontWeight.W_600),
                 subtitle=T(c["chat_id"], size=11, color=Palette.MUTED_LIGHT),
+                trailing=ft.Icon(ft.Icons.HISTORY, color=Palette.MUTED_LIGHT),
+                on_click=lambda e, channel_id=c["id"]: self.spawn(
+                    self._open_channel_history(channel_id)),
             )
             for c in self.channels
         ] or [T("کانالی متصل نیست", color=Palette.MUTED_LIGHT, size=13)]
@@ -1327,16 +1843,71 @@ class App:
                         padding=ft.Padding.only(bottom=16),
                     ),
                     T("کانال‌های متصل", size=18, weight=ft.FontWeight.BOLD),
+                    T("برای دیدن سوابق پیام‌های برنامه، یک کانال را انتخاب کنید.",
+                      size=12, color=Palette.MUTED_LIGHT),
                     ft.Container(height=8),
                     *rows,
                     ft.Container(height=8),
-                    ft.Row([btn_ghost("＋ افزودن کانال", add_clicked)],
-                           alignment=ft.MainAxisAlignment.CENTER),
+                    ft.Row([
+                        btn_ghost("＋ افزودن ربات ایتایار",
+                                  lambda e: self._add_connection_dialog()),
+                        btn_ghost("＋ افزودن کانال", add_clicked),
+                    ], alignment=ft.MainAxisAlignment.CENTER, spacing=8),
                     ft.Container(height=20),
                 ], spacing=4, tight=True, scroll=ft.ScrollMode.AUTO),
                 padding=20,
             ),
         ))
+
+    def _add_connection_dialog(self):
+        name = tf("نام اتصال", value="اتصال ایتایار")
+        token = ft.TextField(
+            label="توکن ربات ایتایار",
+            password=True,
+            can_reveal_password=True,
+            border_radius=14,
+            autofocus=True,
+        )
+
+        async def save_connection(e=None):
+            secret = (token.value or "").strip()
+            if not secret and self.api.online:
+                return self.toast("توکن ایتایار را وارد کنید.", error=True)
+            try:
+                connection = {
+                    "name": (name.value or "اتصال ایتایار").strip(),
+                }
+                if secret:
+                    connection["token"] = secret
+                await self.api.post("/connections", connection)
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            token.value = ""
+            self.page.pop_dialog()
+            self.toast("اتصال ایتایار تأیید شد.")
+            await self._channels_sheet()
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("افزودن اتصال ایتایار", weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                T("توکن را فقط از منبع رسمی بگیرید. در حالت محلی اگر توکن "
+                  "از قبل تنظیم شده باشد، این صفحه آن را جایگزین نمی‌کند.",
+                  size=12, color=Palette.MUTED_LIGHT),
+                name,
+                token,
+            ], tight=True, spacing=10),
+            actions=[
+                ft.TextButton("لغو",
+                              on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("بررسی و ذخیره",
+                                on_click=lambda e: self.spawn(save_connection())),
+            ],
+        ))
+
+    async def _open_channel_history(self, channel_id):
+        self.page.pop_dialog()
+        await self.go("channel_history", channel_id)
 
     async def _add_channel_dialog(self):
         cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
