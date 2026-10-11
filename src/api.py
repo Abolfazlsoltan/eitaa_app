@@ -243,9 +243,9 @@ class Api:
 
         # ---- auth ----
         if path == "/auth/state":
-            return {"has_users": True}
+            raise ApiError("احراز هویت به اتصال سرور نیاز دارد.")
         if path == "/auth/me":
-            return {"id": 0, "username": "me", "name": "کاربر", "role": "owner"}
+            raise ApiError("احراز هویت به اتصال سرور نیاز دارد.")
 
         # ---- connections ----
         if path == "/connections":
@@ -366,7 +366,7 @@ class Api:
 
         mode = body.get("mode", "draft")
         if mode == "schedule":
-            raise ApiError("زمان‌بندی در حال حاضر در دسترس نیست.")
+            raise ApiError("برای زمان‌بندی انتشار به اتصال سرور نیاز دارید.")
 
         channel_ids = list(body.get("channel_ids") or [])
         if mode != "draft" and not channel_ids:

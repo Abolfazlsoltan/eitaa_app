@@ -16,11 +16,12 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 
 from . import ai, analytics, auth, eitaa
@@ -228,8 +229,8 @@ class ChanIn(BaseModel):
 class PostIn(BaseModel):
     title: str = ""
     text: str
-    channel_ids: list[int] = []
-    mode: str = "draft"
+    channel_ids: list[int] = Field(default_factory=list)
+    mode: Literal["draft", "now", "schedule"] = "draft"
     scheduled_at: dt.datetime | None = None
     silent: bool = False
     pin: bool = False
@@ -357,8 +358,29 @@ def _create_post(b: PostIn) -> dict:
         raise HTTPException(400, "حداقل یک کانال انتخاب کنید.")
     if b.mode == "schedule" and not b.scheduled_at:
         raise HTTPException(400, "زمان انتشار را مشخص کنید.")
+    if len(b.channel_ids) != len(set(b.channel_ids)):
+        raise HTTPException(400, "کانال تکراری انتخاب شده است.")
+
+    scheduled_at = b.scheduled_at
+    if b.mode == "schedule" and scheduled_at:
+        if scheduled_at.tzinfo is not None:
+            scheduled_at = scheduled_at.astimezone(dt.timezone.utc).replace(
+                tzinfo=None
+            )
+        if scheduled_at <= now():
+            raise HTTPException(400, "زمان انتشار باید در آینده باشد.")
 
     with Session() as s:
+        if b.mode != "draft":
+            channel_ids = set(b.channel_ids)
+            available_ids = set(s.scalars(
+                select(Channel.id).where(Channel.id.in_(channel_ids))
+            ))
+            if available_ids != channel_ids:
+                raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
+        if b.media_id is not None and not s.get(MediaAsset, b.media_id):
+            raise HTTPException(404, "فایل رسانه‌ای پیدا نشد.")
+
         p = Post(
             title=b.title,
             text=b.text,
@@ -366,7 +388,7 @@ def _create_post(b: PostIn) -> dict:
             pin=b.pin,
             view_to_delete=b.view_to_delete,
             media_id=b.media_id,
-            scheduled_at=b.scheduled_at,
+            scheduled_at=scheduled_at,
             status={"draft": "draft", "now": "queued",
                     "schedule": "scheduled"}[b.mode],
         )
@@ -374,7 +396,7 @@ def _create_post(b: PostIn) -> dict:
         s.flush()
 
         if b.mode != "draft":
-            at = b.scheduled_at if b.mode == "schedule" else now()
+            at = scheduled_at if b.mode == "schedule" else now()
             for cid in b.channel_ids:
                 s.add(Delivery(
                     post_id=p.id, channel_id=cid,
@@ -620,7 +642,7 @@ def _media_row(s, m: MediaAsset) -> dict:
 
 @app.post("/api/media")
 async def upload(file: UploadFile = File(...), tags: str = Form("")):
-    data = await file.read()
+    data = await file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "حجم فایل بیش از ۲۰ مگابایت است.")
     name = os.path.basename(file.filename or "file")

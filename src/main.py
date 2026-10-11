@@ -15,7 +15,7 @@ import flet as ft
 
 import config
 from api import Api, ApiError
-from fa import digits, jdate
+from fa import digits, jdate, to_utc_iso
 
 
 # =================================================================== palette
@@ -893,6 +893,18 @@ class App:
             border_color="#E2E8F0",
             focused_border_color=Palette.PRIMARY,
         )
+        scheduled_date = ft.TextField(
+            label="تاریخ انتشار",
+            value=dt.datetime.now().strftime("%Y-%m-%d"),
+            hint_text="YYYY-MM-DD",
+            expand=True,
+        )
+        scheduled_time = ft.TextField(
+            label="ساعت انتشار",
+            value=dt.datetime.now().strftime("%H:%M"),
+            hint_text="HH:MM",
+            expand=True,
+        )
         prompt = tf("موضوع یا ایده", hint_text="مثلاً: معرفی اپلیکیشن جدید")
 
         async def run_ai(action: str):
@@ -954,22 +966,48 @@ class App:
                 return
             if not (text.value or "").strip():
                 return self.toast("متن پست را بنویسید", error=True)
-            if mode == "now" and not state["selected"]:
+            if mode != "draft" and not state["selected"]:
                 return self.toast("حداقل یک کانال انتخاب کنید", error=True)
+
+            scheduled_at = None
+            if mode == "schedule":
+                try:
+                    local_time = dt.datetime.strptime(
+                        f"{scheduled_date.value or ''} {scheduled_time.value or ''}",
+                        "%Y-%m-%d %H:%M",
+                    )
+                except ValueError:
+                    return self.toast(
+                        "تاریخ را به شکل YYYY-MM-DD و ساعت را به شکل HH:MM وارد کنید",
+                        error=True,
+                    )
+                if local_time <= dt.datetime.now():
+                    return self.toast("زمان انتشار باید در آینده باشد", error=True)
+                scheduled_at = to_utc_iso(local_time)
 
             state["busy"] = True
             try:
                 if mode == "now":
                     self.toast("در حال ارسال…")
-                await self.api.post("/posts", {
+                elif mode == "schedule":
+                    self.toast("در حال ثبت زمان‌بندی…")
+                payload = {
                     "title": title.value or "",
                     "text": text.value,
                     "channel_ids": sorted(state["selected"]),
                     "mode": mode,
                     "silent": state["silent"],
                     "pin": state["pin"],
-                })
-                self.toast("✓ " + ("ارسال شد" if mode == "now" else "ذخیره شد"))
+                }
+                if scheduled_at:
+                    payload["scheduled_at"] = scheduled_at
+                await self.api.post("/posts", payload)
+                success = {
+                    "now": "درخواست انتشار ثبت شد",
+                    "schedule": "زمان‌بندی ثبت شد",
+                    "draft": "پیش‌نویس ذخیره شد",
+                }[mode]
+                self.toast("✓ " + success)
                 state["busy"] = False
                 await self.go("posts")
             except ApiError as e:
@@ -1052,6 +1090,18 @@ class App:
 
             ft.Container(height=12),
 
+            # --- schedule ---
+            surface_card(
+                T("زمان‌بندی انتشار", size=15,
+                  weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                T("برای انتشار خودکار باید به سرور متصل باشید.",
+                  size=12, color=Palette.MUTED_LIGHT),
+                ft.Row([scheduled_date, scheduled_time], spacing=12),
+            ),
+
+            ft.Container(height=12),
+
             # --- channels ---
             surface_card(
                 T("انتشار در کانال‌ها", size=15,
@@ -1102,12 +1152,16 @@ class App:
 
         # ---- bottom action bar ----
         action_bar = ft.Container(
-            content=ft.Row([
-                btn_ghost("ذخیره پیش‌نویس",
-                          lambda e: self.spawn(save("draft")), expand=True),
+            content=ft.Column([
+                ft.Row([
+                    btn_ghost("ذخیره پیش‌نویس",
+                              lambda e: self.spawn(save("draft")), expand=True),
+                    btn_ghost("زمان‌بندی",
+                              lambda e: self.spawn(save("schedule")), expand=True),
+                ], spacing=12),
                 btn_primary("انتشار",
                             lambda e: self.spawn(save("now")), expand=True),
-            ], spacing=12),
+            ], spacing=8),
             padding=ft.Padding.symmetric(horizontal=16, vertical=12),
             bgcolor=Palette.CARD_LIGHT,
             shadow=ft.BoxShadow(blur_radius=20, color="#0F172A14",
