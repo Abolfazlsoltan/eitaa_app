@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import io
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -19,6 +20,8 @@ import flet as ft
 import config
 from api import Api, ApiError
 from fa import digits, jdate, jfull_utc, to_utc_iso
+
+logger = logging.getLogger(__name__)
 
 
 # =================================================================== palette
@@ -303,6 +306,7 @@ class App:
         except ApiError as e:
             return self.show(self._error_view(str(e), "home"))
         except Exception:
+            logger.exception("Application startup failed during bootstrap")
             return self.show(self._error_view(
                 "ذخیره‌سازی برنامه در دسترس نیست. دوباره تلاش کنید.", "home"
             ))
@@ -542,7 +546,12 @@ class App:
         except ApiError as e:
             content = self._error_view(str(e), name)
         except Exception:
-            content = self._error_view("مشکلی پیش آمد. دوباره تلاش کنید.", name)
+            logger.exception("Failed to load screen %r", name)
+            content = self._error_view(
+                "بارگذاری این صفحه ناموفق بود. دوباره تلاش کنید یا به صفحه قبل برگردید.",
+                name,
+                retry_args=args,
+            )
 
         self.body.content = content
         self.page.update()
@@ -557,7 +566,7 @@ class App:
             )
         return None
 
-    def _error_view(self, message, back_to="home"):
+    def _error_view(self, message, back_to="home", retry_args=()):
         # A failed sub-screen should go back to a screen that can render.
         target = back_to if back_to in NAV_VIEWS else "home"
         return ft.Container(
@@ -572,6 +581,13 @@ class App:
                 T(message, size=14, color=Palette.MUTED_LIGHT,
                   text_align=ft.TextAlign.CENTER),
                 ft.Container(height=24),
+                *(
+                    [btn_ghost(
+                        "تلاش دوباره",
+                        lambda e: self.spawn(self.go(back_to, *retry_args)),
+                    )]
+                    if back_to not in NAV_VIEWS else []
+                ),
                 btn_ghost("بازگشت",
                           lambda e: self.spawn(self.go(target))),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1731,7 +1747,7 @@ class App:
                 ft.dropdown.Option("ar", "العربية"),
             ],
             expand=True,
-            on_change=lambda e: self.spawn(self._persist_ai_preference(
+            on_select=lambda e: self.spawn(self._persist_ai_preference(
                 "language", e.control.value
             )),
         )
@@ -1745,7 +1761,7 @@ class App:
                 ft.dropdown.Option("news", "خبری"),
             ],
             expand=True,
-            on_change=lambda e: self.spawn(self._persist_ai_preference(
+            on_select=lambda e: self.spawn(self._persist_ai_preference(
                 "tone", e.control.value
             )),
         )
@@ -1758,7 +1774,7 @@ class App:
                 ft.dropdown.Option("long", "مفصل"),
             ],
             expand=True,
-            on_change=lambda e: self.spawn(self._persist_ai_preference(
+            on_select=lambda e: self.spawn(self._persist_ai_preference(
                 "length", e.control.value
             )),
         )
@@ -2456,7 +2472,7 @@ class App:
             )
             self.page.update()
 
-        provider.on_change = provider_changed
+        provider.on_select = provider_changed
 
         async def save_settings(show_toast=True):
             try:
