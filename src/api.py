@@ -15,6 +15,8 @@ device. The UI never needs to know which path is being used.
 from __future__ import annotations
 
 import datetime as dt
+import csv
+import io
 import json
 import mimetypes
 import re
@@ -78,6 +80,7 @@ _AI_ACTIONS: dict[str, str] = {
     "translate": "متن زیر را ترجمه کن (فارسی به انگلیسی و غیرفارسی به فارسی):",
     "summarize": "متن زیر را خلاصه کن:",
     "proofread": "غلط‌های نگارشی و املایی متن زیر را اصلاح کن و معنا را تغییر نده:",
+    "variants": "سه نسخه متفاوت و مستقل از متن زیر پیشنهاد بده و هر نسخه را شماره‌گذاری کن:",
 }
 
 
@@ -171,6 +174,9 @@ class Api:
     async def put(self, path: str, body: Any = None) -> Any:
         return await self._dispatch("PUT", path, body)
 
+    async def patch(self, path: str, body: Any = None) -> Any:
+        return await self._dispatch("PATCH", path, body)
+
     async def delete(self, path: str) -> Any:
         return await self._dispatch("DELETE", path, None)
 
@@ -206,10 +212,20 @@ class Api:
     def logout(self) -> None:
         self.token = None
 
-    async def ai(self, action: str, text: str, prompt: str = "") -> str:
+    async def ai(
+        self, action: str, text: str, prompt: str = "",
+        language: str = "fa", tone: str = "neutral", length: str = "medium",
+    ) -> str:
         result = await self._dispatch(
             "POST", "/ai",
-            {"action": action, "text": text, "prompt": prompt},
+            {
+                "action": action,
+                "text": text,
+                "prompt": prompt,
+                "language": language,
+                "tone": tone,
+                "length": length,
+            },
             timeout=_TIMEOUT_AI,
         )
         return str((result or {}).get("text", ""))
@@ -293,13 +309,122 @@ class Api:
             timeout=_TIMEOUT_UPLOAD,
         )
 
+    async def latest_release(self) -> dict:
+        url = (
+            "https://api.github.com/repos/"
+            "Abolfazlsoltan/eitaa_app/releases/latest"
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=_TIMEOUT, follow_redirects=True
+            ) as client:
+                response = await client.get(
+                    url,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                )
+            data = response.json()
+        except (httpx.HTTPError, ValueError):
+            raise ApiError(
+                "بررسی نسخه جدید انجام نشد؛ اتصال اینترنت را بررسی کنید.",
+                network=True,
+            )
+        if response.status_code != 200 or not isinstance(data, dict):
+            raise ApiError("اطلاعات نسخه جدید از GitHub دریافت نشد.")
+        if data.get("draft") or data.get("prerelease"):
+            raise ApiError("نسخه پایدار در دسترس نیست.")
+        page_url = data.get("html_url")
+        if not self._is_github_release_url(page_url):
+            raise ApiError("پیوند انتشار دریافتی معتبر نیست.")
+        apk_url = next((
+            asset.get("browser_download_url")
+            for asset in data.get("assets", [])
+            if isinstance(asset, dict)
+            and str(asset.get("name", "")).lower().endswith(".apk")
+            and self._is_github_release_url(asset.get("browser_download_url"))
+        ), "")
+        return {
+            "tag": str(data.get("tag_name") or ""),
+            "name": str(data.get("name") or data.get("tag_name") or ""),
+            "notes": str(data.get("body") or "")[:12000],
+            "url": page_url,
+            "apk_url": apk_url,
+        }
+
+    @staticmethod
+    def _is_github_release_url(url: Any) -> bool:
+        if not isinstance(url, str):
+            return False
+        parsed = urlparse(url)
+        return parsed.scheme == "https" and parsed.hostname == "github.com"
+
+    async def export_history(
+        self, export_format: str, *, query: str = "", status: str = "all",
+        channel_id: int | None = None,
+    ) -> tuple[str, bytes]:
+        if export_format not in ("json", "csv"):
+            raise ApiError("قالب خروجی پشتیبانی نمی‌شود.")
+        params: dict[str, Any] = {
+            "q": query,
+            "status": status,
+            "limit": 1000,
+            "offset": 0,
+        }
+        if channel_id is not None:
+            params["channel_id"] = channel_id
+        records = await self.get("/history", params=params)
+        if not isinstance(records, list):
+            raise ApiError("پاسخ تاریخچه برای خروجی معتبر نیست.")
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        if export_format == "json":
+            content = json.dumps(
+                records, ensure_ascii=False, indent=2, default=str
+            ).encode("utf-8")
+            return f"eitaa-history-{stamp}.json", content
+
+        channels = await self.get("/channels")
+        channel_names = {
+            channel.get("id"): channel.get("title", "")
+            for channel in channels if isinstance(channel, dict)
+        }
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow([
+            "post_id", "title", "text", "post_status", "channel",
+            "channel_id", "delivery_status", "message_id", "published_at",
+            "created_at",
+        ])
+        for post in records:
+            for delivery in post.get("deliveries", []):
+                values = [
+                    post.get("id"),
+                    post.get("title", ""),
+                    post.get("text", ""),
+                    post.get("status", ""),
+                    channel_names.get(delivery.get("channel_id"), ""),
+                    delivery.get("channel_id", ""),
+                    delivery.get("status", ""),
+                    delivery.get("remote_message_id") or "",
+                    delivery.get("done_at") or "",
+                    post.get("created_at") or "",
+                ]
+                writer.writerow([
+                    "'" + value if isinstance(value, str)
+                    and value.startswith(("=", "+", "-", "@"))
+                    else value
+                    for value in values
+                ])
+        return f"eitaa-history-{stamp}.csv", stream.getvalue().encode("utf-8-sig")
+
     # -------------------------------------------------------- dispatcher ---
     async def _dispatch(self, method, path, body, *, params=None,
                         files=None, data=None, timeout=None):
         if self.online:
             return await self._http(method, path, body,
                                     params, files, data, timeout)
-        return await self._device(method, path, body)
+        return await self._device(method, path, body, params=params)
 
     # -------------------------------------------------------- HTTP path ----
     async def _http(self, method, path, body, params, files, data, timeout):
@@ -352,7 +477,9 @@ class Api:
         if await self._load("templates", None) is None:
             await self._save("templates", _DEFAULT_TEMPLATES)
 
-    async def _device(self, method: str, path: str, body: Any) -> Any:
+    async def _device(
+        self, method: str, path: str, body: Any, *, params: dict | None = None
+    ) -> Any:
         path = path.split("?", 1)[0]
 
         # ---- auth ----
@@ -378,6 +505,9 @@ class Api:
             if method == "POST":
                 return await self._create_post(body or {})
             return await self._load("posts", [])
+
+        if path == "/history":
+            return await self._device_history(params or {})
 
         m = re.match(r"^/posts/(\d+)/cancel$", path)
         if m and method == "POST":
@@ -426,6 +556,49 @@ class Api:
             "data:" + key,
             json.dumps(value, ensure_ascii=False, default=str),
         )
+
+    async def _device_history(self, params: dict) -> list[dict]:
+        posts = await self._load("posts", [])
+        channels = await self._load("channels", [])
+        names = {
+            channel.get("id"): channel
+            for channel in channels if isinstance(channel, dict)
+        }
+        query = str(params.get("q") or "").strip().casefold()
+        status = str(params.get("status") or "published")
+        channel_id = params.get("channel_id")
+        try:
+            channel_id = int(channel_id) if channel_id is not None else None
+            limit = max(1, min(int(params.get("limit", 200)), 1000))
+            offset = max(0, int(params.get("offset", 0)))
+        except (TypeError, ValueError):
+            raise ApiError("پارامترهای تاریخچه معتبر نیستند.")
+
+        matches = []
+        for post in posts:
+            deliveries = [
+                delivery for delivery in post.get("deliveries", [])
+                if (status == "all" or delivery.get("status") == status)
+                and (channel_id is None
+                     or delivery.get("channel_id") == channel_id)
+            ]
+            if not deliveries:
+                continue
+            searchable = " ".join([
+                str(post.get("title") or ""),
+                str(post.get("text") or ""),
+                *[
+                    str(names.get(delivery.get("channel_id"), {}).get(key) or "")
+                    for delivery in deliveries
+                    for key in ("title", "chat_id")
+                ],
+            ]).casefold()
+            if query and query not in searchable:
+                continue
+            item = dict(post)
+            item["deliveries"] = deliveries
+            matches.append(item)
+        return matches[offset:offset + limit]
 
     async def _log(self, kind: str, message: str) -> None:
         log = await self._load("activity", [])
@@ -532,10 +705,13 @@ class Api:
             "signature": (body.get("signature") or "").strip(),
             "status": "draft" if mode == "draft" else "queued",
             "scheduled_at": None,
+            "created_at": _iso_now(),
+            "updated_at": _iso_now(),
             "silent": bool(body.get("silent")),
             "pin": bool(body.get("pin")),
             "view_to_delete": body.get("view_to_delete"),
             "reply_to_message_id": body.get("reply_to_message_id"),
+            "revisions": [],
             "deliveries": [
                 {
                     "id": new_id * 1000 + i,
@@ -599,6 +775,19 @@ class Api:
                 if (r.status_code == 200 and isinstance(j, dict)
                         and j.get("ok") is True):
                     d["status"] = "published"
+                    d["done_at"] = _iso_now()
+                    result = j.get("result")
+                    message_id = (
+                        result.get("message_id")
+                        if isinstance(result, dict) else None
+                    )
+                    d["remote_message_id"] = (
+                        message_id
+                        if isinstance(message_id, int)
+                        and not isinstance(message_id, bool)
+                        and message_id > 0
+                        else None
+                    )
                     success += 1
                 else:
                     d["status"] = "failed"
@@ -655,10 +844,26 @@ class Api:
             raise ApiError("یکی از کانال‌های انتخاب‌شده پیدا نشد.")
         if mode == "now" and not channel_ids:
             raise ApiError("حداقل یک کانال انتخاب کنید.")
+        revisions = post.setdefault("revisions", [])
+        if any(
+            post.get(key, "") != value
+            for key, value in (
+                ("title", (body.get("title") or "").strip()),
+                ("text", text),
+                ("signature", (body.get("signature") or "").strip()),
+            )
+        ):
+            revisions.insert(0, {
+                "title": post.get("title", ""),
+                "text": post.get("text", ""),
+                "signature": post.get("signature", ""),
+                "created_at": _iso_now(),
+            })
         post.update({
             "title": (body.get("title") or "").strip(),
             "text": text,
             "signature": (body.get("signature") or "").strip(),
+            "updated_at": _iso_now(),
             "silent": bool(body.get("silent")),
             "pin": bool(body.get("pin")),
             "view_to_delete": body.get("view_to_delete"),
@@ -723,6 +928,8 @@ class Api:
             "scheduled": 0,
             "queued": count("queued"),
             "ai_calls": len(await self._load("ai_usage", [])),
+            "channels": len(await self._load("channels", [])),
+            "drafts": count("draft"),
         }
 
     # ------------------------------------------------------------ AI -------
@@ -747,7 +954,39 @@ class Api:
         if not (text.strip() or prompt.strip()):
             raise ApiError("لطفاً ابتدا متنی بنویسید.")
 
-        user_msg = f"{instruction}\n\n{text}" if text else instruction
+        language = body.get("language", "fa")
+        tone = body.get("tone", "neutral")
+        length = body.get("length", "medium")
+        if language not in ("fa", "en", "ar"):
+            raise ApiError("زبان خروجی انتخاب‌شده معتبر نیست.")
+        if tone not in ("neutral", "formal", "friendly", "news"):
+            raise ApiError("لحن انتخاب‌شده معتبر نیست.")
+        if length not in ("short", "medium", "long"):
+            raise ApiError("اندازه خروجی انتخاب‌شده معتبر نیست.")
+        guidance = {
+            "fa": "فارسی",
+            "en": "انگلیسی",
+            "ar": "عربی",
+        }[language]
+        tone_guidance = {
+            "neutral": "متعادل",
+            "formal": "رسمی",
+            "friendly": "دوستانه",
+            "news": "خبری",
+        }[tone]
+        length_guidance = {
+            "short": "کوتاه",
+            "medium": "متوسط",
+            "long": "مفصل",
+        }[length]
+        preferences = (
+            f"زبان خروجی: {guidance}. لحن: {tone_guidance}. "
+            f"طول: {length_guidance}."
+        )
+        user_msg = (
+            f"{instruction}\n\n{preferences}"
+            + (f"\n\n{text}" if text else "")
+        )
         endpoint = _GROQ_URL
         model = await self.storage.get("ai_model")
         if provider == "groq":

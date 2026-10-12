@@ -55,6 +55,63 @@ class ClientFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_local_history_filters_and_exports_csv_and_json(self):
+        async def run():
+            await self.api._save("channels", [{
+                "id": 2, "title": "کانال آزمایشی", "chat_id": "test",
+            }])
+            await self.api._save("posts", [{
+                "id": 8,
+                "title": "برنامه آزمایشی",
+                "text": "متن منتشرشده",
+                "status": "published",
+                "created_at": "2026-01-01T10:00:00",
+                "deliveries": [{
+                    "channel_id": 2,
+                    "status": "published",
+                    "remote_message_id": 42,
+                    "done_at": "2026-01-01T10:01:00",
+                }],
+            }])
+            history = await self.api.get("/history", params={
+                "q": "آزمایشی",
+                "channel_id": 2,
+                "status": "published",
+            })
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["deliveries"][0]["remote_message_id"], 42)
+
+            json_name, json_data = await self.api.export_history("json")
+            csv_name, csv_data = await self.api.export_history("csv")
+            self.assertTrue(json_name.endswith(".json"))
+            self.assertTrue(csv_name.endswith(".csv"))
+            self.assertIn("متن منتشرشده", json_data.decode("utf-8"))
+            self.assertIn("42", csv_data.decode("utf-8-sig"))
+
+            self.assertEqual(await self.api.get("/history", params={
+                "channel_id": 3,
+            }), [])
+
+        asyncio.run(run())
+
+    def test_local_draft_edit_keeps_previous_revision(self):
+        async def run():
+            created = await self.api._create_post({
+                "title": "Before",
+                "text": "Original",
+                "mode": "draft",
+            })
+            await self.api._update_draft(created["id"], {
+                "title": "After",
+                "text": "Corrected",
+            })
+            post = (await self.api.get("/posts"))[0]
+            self.assertEqual(post["title"], "After")
+            self.assertEqual(post["revisions"][0]["title"], "Before")
+            self.assertEqual(post["revisions"][0]["text"], "Original")
+
+        asyncio.run(run())
+
     def test_published_local_post_cannot_be_deleted_as_a_draft(self):
         async def run():
             await self.api._save("posts", [{
@@ -103,6 +160,10 @@ class ClientFeatureTests(unittest.TestCase):
                     "view_to_delete": 50,
                     "reply_to_message_id": 7,
                 },
+            )
+            posts = await self.api.get("/posts")
+            self.assertEqual(
+                posts[0]["deliveries"][0]["remote_message_id"], 1
             )
 
         asyncio.run(run())
@@ -173,6 +234,49 @@ class ClientFeatureTests(unittest.TestCase):
                     )
             self.assertNotIn("groq_key", self.storage.values)
             self.assertNotIn("ai_provider", self.storage.values)
+
+        asyncio.run(run())
+
+    def test_latest_release_exposes_only_stable_github_apk_links(self):
+        async def run():
+            payload = {
+                "draft": False,
+                "prerelease": False,
+                "tag_name": "v2.1.0",
+                "name": "Release 2.1.0",
+                "body": "Release notes",
+                "html_url": (
+                    "https://github.com/Abolfazlsoltan/"
+                    "eitaa_app/releases/tag/v2.1.0"
+                ),
+                "assets": [{
+                    "name": "manager.apk",
+                    "browser_download_url": (
+                        "https://github.com/Abolfazlsoltan/"
+                        "eitaa_app/releases/download/v2.1.0/manager.apk"
+                    ),
+                }],
+            }
+            response = SimpleNamespace(
+                status_code=200, json=lambda: payload,
+            )
+            client = mock_client(response)
+            client.get = AsyncMock(return_value=response)
+            with patch("api.httpx.AsyncClient", return_value=client):
+                release = await self.api.latest_release()
+            self.assertEqual(release["tag"], "v2.1.0")
+            self.assertTrue(release["apk_url"].endswith("manager.apk"))
+
+            payload["prerelease"] = True
+            with patch("api.httpx.AsyncClient", return_value=client):
+                with self.assertRaisesRegex(ApiError, "نسخه پایدار"):
+                    await self.api.latest_release()
+
+            payload["prerelease"] = False
+            payload["html_url"] = "https://example.com/fake-release"
+            with patch("api.httpx.AsyncClient", return_value=client):
+                with self.assertRaisesRegex(ApiError, "پیوند انتشار"):
+                    await self.api.latest_release()
 
         asyncio.run(run())
 

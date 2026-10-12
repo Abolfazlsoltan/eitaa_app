@@ -1,6 +1,9 @@
 import os, datetime as dt
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import (
+    create_engine, String, Integer, Boolean, DateTime, ForeignKey, Text,
+    UniqueConstraint, select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 engine = create_engine(os.getenv("DATABASE_URL", "sqlite:///./data.db"), connect_args={"check_same_thread": False} if "sqlite" in os.getenv("DATABASE_URL", "sqlite") else {})
@@ -41,6 +44,19 @@ class Post(Base):
     media_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime, default=now, nullable=True
+    )
+
+
+class PostRevision(Base):
+    __tablename__ = "post_revisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
+    title: Mapped[str] = mapped_column(String(200), default="")
+    text: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
 
 class Delivery(Base):  # independent status per channel
     __tablename__ = "deliveries"
@@ -54,6 +70,32 @@ class Delivery(Base):  # independent status per channel
     run_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
     error: Mapped[str] = mapped_column(Text, default="")
     done_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    remote_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticket: Mapped[str] = mapped_column(String(24), unique=True)
+    category: Mapped[str] = mapped_column(String(20))
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    reply: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+
+
+class RemovalReminder(Base):
+    __tablename__ = "removal_reminders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    delivery_id: Mapped[int] = mapped_column(ForeignKey("deliveries.id"))
+    remote_message_id: Mapped[int] = mapped_column(Integer)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+    due_at: Mapped[dt.datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(20), default="scheduled")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+
 
 class ActivityLog(Base):
     __tablename__ = "activity_log"
@@ -122,19 +164,57 @@ class Automation(Base):
     require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+    version: Mapped[int] = mapped_column(primary_key=True)
+    applied_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+
+
 MIGRATIONS = {
-    "posts": [
-        ("media_id", "INTEGER"),
-        ("reply_to_message_id", "INTEGER"),
-        ("signature", "TEXT DEFAULT ''"),
-    ],
-    "deliveries": [("done_at", "DATETIME")],
+    1: {
+        "posts": [
+            ("media_id", "INTEGER"),
+            ("reply_to_message_id", "INTEGER"),
+            ("signature", "TEXT DEFAULT ''"),
+        ],
+        "deliveries": [
+            ("done_at", "DATETIME"),
+            ("remote_message_id", "INTEGER"),
+        ],
+    },
+    2: {
+        "posts": [("updated_at", "DATETIME")],
+    },
+    3: {},
 }
-def init():  # create_all + tiny additive migrations; use Alembic for production
+
+
+def init():
+    """Create new tables and apply ordered, additive schema migrations."""
     from sqlalchemy import text, inspect
     Base.metadata.create_all(engine)
-    for table, cols in MIGRATIONS.items():
-        have = [c["name"] for c in inspect(engine).get_columns(table)]
-        for name, ddl in cols:
-            if name not in have:
-                with engine.begin() as c: c.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+    with Session.begin() as session:
+        applied = set(session.scalars(
+            select(SchemaMigration.version)
+        ).all())
+        for version, tables in MIGRATIONS.items():
+            if version in applied:
+                continue
+            for table, columns in tables.items():
+                have = {
+                    column["name"]
+                    for column in inspect(engine).get_columns(table)
+                }
+                for name, ddl in columns:
+                    if name not in have:
+                        session.execute(text(
+                            f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"
+                        ))
+                        have.add(name)
+                    if table == "posts" and name == "updated_at":
+                        session.execute(text(
+                            "UPDATE posts SET updated_at = created_at "
+                            "WHERE updated_at IS NULL"
+                        ))
+            session.add(SchemaMigration(version=version))
