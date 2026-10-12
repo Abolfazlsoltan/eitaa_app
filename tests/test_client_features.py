@@ -68,6 +68,69 @@ class ClientFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_local_publish_forwards_supported_message_options(self):
+        async def run():
+            self.storage.values["token"] = "test-token"
+            await self.api._save("channels", [{
+                "id": 1, "title": "test", "chat_id": "test-channel",
+            }])
+            response = SimpleNamespace(
+                status_code=200,
+                json=lambda: {"ok": True, "result": {"message_id": 1}},
+            )
+            client = mock_client(response)
+            with (
+                patch("api.config.EITAA_TOKEN", ""),
+                patch("api.httpx.AsyncClient", return_value=client),
+            ):
+                result = await self.api._create_post({
+                    "title": "title",
+                    "text": "body",
+                    "signature": "footer",
+                    "channel_ids": [1],
+                    "mode": "now",
+                    "view_to_delete": 50,
+                    "reply_to_message_id": 7,
+                })
+            self.assertEqual(result["status"], "published")
+            _, kwargs = client.post.await_args
+            self.assertEqual(
+                kwargs["data"],
+                {
+                    "chat_id": "test-channel",
+                    "text": "body\n\nfooter",
+                    "title": "title",
+                    "view_to_delete": 50,
+                    "reply_to_message_id": 7,
+                },
+            )
+
+        asyncio.run(run())
+
+    def test_local_publish_does_not_claim_success_without_ok_flag(self):
+        async def run():
+            self.storage.values["token"] = "test-token"
+            await self.api._save("channels", [{
+                "id": 1, "title": "test", "chat_id": "test-channel",
+            }])
+            response = SimpleNamespace(
+                status_code=200,
+                json=lambda: {"result": {"message_id": 1}},
+            )
+            client = mock_client(response)
+            with (
+                patch("api.config.EITAA_TOKEN", ""),
+                patch("api.httpx.AsyncClient", return_value=client),
+            ):
+                result = await self.api._create_post({
+                    "text": "body", "channel_ids": [1], "mode": "now",
+                })
+            self.assertEqual(result["status"], "failed")
+            posts = await self.api.get("/posts")
+            self.assertEqual(posts[0]["deliveries"][0]["status"], "failed")
+
+        asyncio.run(run())
+
     def test_ai_settings_store_key_in_provider_specific_slot(self):
         async def run():
             await self.api.save_ai_settings(

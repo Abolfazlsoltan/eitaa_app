@@ -99,6 +99,38 @@ class PostValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "draft")
 
+    def test_post_stores_supported_reply_and_view_delete_options(self):
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "title": "message options",
+                "text": "body",
+                "channel_ids": [self.channel_id],
+                "view_to_delete": 100,
+                "reply_to_message_id": 42,
+                "signature": "footer",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        stored = next(
+            post for post in self.client.get(
+                "/api/posts", headers=self.headers
+            ).json()
+            if post["id"] == response.json()["id"]
+        )
+        self.assertEqual(stored["view_to_delete"], 100)
+        self.assertEqual(stored["reply_to_message_id"], 42)
+        self.assertEqual(stored["signature"], "footer")
+
+    def test_rejects_nonpositive_view_threshold(self):
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={"text": "body", "view_to_delete": 0},
+        )
+        self.assertEqual(response.status_code, 422)
+
     def test_accepts_scheduled_post_for_existing_channel(self):
         scheduled_at = (
             datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
@@ -163,6 +195,79 @@ class PostValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], "زمان انتشار باید در آینده باشد.")
 
+    def test_rejects_schedule_beyond_thirty_days(self):
+        scheduled_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(days=31)
+        ).isoformat()
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "text": "too far",
+                "mode": "schedule",
+                "scheduled_at": scheduled_at,
+                "channel_ids": [self.channel_id],
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"], "زمان‌بندی فقط تا ۳۰ روز آینده مجاز است."
+        )
+
+    def test_rejects_repeating_schedule_with_occurrence_after_thirty_days(self):
+        scheduled_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(days=25)
+        ).isoformat()
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "text": "weekly repeat",
+                "mode": "schedule",
+                "scheduled_at": scheduled_at,
+                "repeat": "weekly",
+                "repeat_count": 2,
+                "channel_ids": [self.channel_id],
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"],
+            "تمام نوبت‌های تکرار باید در ۳۰ روز آینده باشند.",
+        )
+
+    def test_creates_each_valid_repeating_schedule_occurrence(self):
+        scheduled_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            + timedelta(days=1)
+        ).isoformat()
+        response = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={
+                "text": "daily repeat",
+                "mode": "schedule",
+                "scheduled_at": scheduled_at,
+                "repeat": "daily",
+                "repeat_count": 3,
+                "channel_ids": [self.channel_id],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        scheduled = [
+            post for post in self.client.get(
+                "/api/posts", headers=self.headers
+            ).json()
+            if post["text"] == "daily repeat"
+        ]
+        self.assertEqual(len(scheduled), 3)
+        self.assertTrue(all(post["status"] == "scheduled" for post in scheduled))
+        self.assertEqual(
+            len({post["scheduled_at"] for post in scheduled}), 3
+        )
+
     def test_owner_can_edit_and_delete_draft(self):
         created = self.client.post(
             "/api/posts",
@@ -175,7 +280,13 @@ class PostValidationTests(unittest.TestCase):
         edited = self.client.put(
             f"/api/posts/{post_id}",
             headers=self.headers,
-            json={"title": "edited", "text": "after"},
+            json={
+                "title": "edited",
+                "text": "after",
+                "signature": "footer",
+                "view_to_delete": 25,
+                "reply_to_message_id": 8,
+            },
         )
         self.assertEqual(edited.status_code, 200)
         self.assertEqual(edited.json()["status"], "draft")
@@ -183,6 +294,9 @@ class PostValidationTests(unittest.TestCase):
         stored = next(post for post in posts if post["id"] == post_id)
         self.assertEqual(stored["title"], "edited")
         self.assertEqual(stored["text"], "after")
+        self.assertEqual(stored["signature"], "footer")
+        self.assertEqual(stored["view_to_delete"], 25)
+        self.assertEqual(stored["reply_to_message_id"], 8)
 
         deleted = self.client.delete(
             f"/api/posts/{post_id}", headers=self.headers,
@@ -246,6 +360,31 @@ class PostValidationTests(unittest.TestCase):
             f"/api/posts/{post_id}", headers=self.headers,
         )
         self.assertEqual(deleted.status_code, 400)
+
+    def test_owner_can_manage_subusers_with_roles(self):
+        created = self.client.post(
+            "/api/team",
+            headers=self.headers,
+            json={
+                "username": "editor1",
+                "password": "editor-password-123",
+                "role": "editor",
+                "display_name": "Editor",
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        member = created.json()
+        self.assertEqual(member["role"], "editor")
+        self.assertNotIn("pw_hash", member)
+
+        listed = self.client.get("/api/team", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(user["id"] == member["id"] for user in listed.json()))
+
+        deleted = self.client.delete(
+            f"/api/team/{member['id']}", headers=self.headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
 
     def test_rejects_upload_over_configured_limit(self):
         with patch("backend.main.MAX_UPLOAD", 4):
