@@ -125,12 +125,14 @@ async def deliver(delivery_id: int) -> None:
                 await eitaa.send_file(
                     token, ch.chat_id,
                     os.path.join(MEDIA_DIR, m.stored_name), m.filename,
-                    p.text, p.title, p.silent, p.pin, p.view_to_delete,
+                    _post_content(p), p.title, p.silent, p.pin, p.view_to_delete,
+                    p.reply_to_message_id,
                 )
             else:
                 await eitaa.send_message(
-                    token, ch.chat_id, p.text, p.title,
+                    token, ch.chat_id, _post_content(p), p.title,
                     p.silent, p.pin, p.view_to_delete,
+                    p.reply_to_message_id,
                 )
             d.status, d.error, d.done_at = "published", "", now()
             log(s, "publish", f"«{p.title or p.id}» در {ch.title} منتشر شد")
@@ -143,10 +145,15 @@ async def deliver(delivery_id: int) -> None:
                 d.status = "queued"
                 d.run_at = now() + dt.timedelta(seconds=30 * (2 ** d.attempts))
             log(s, "error", f"ارسال به {ch.title} انجام نشد: {e}")
-
         s.commit()
         _refresh_post(s, p.id)
         s.commit()
+
+
+def _post_content(post: Post) -> str:
+    body = (post.text or "").strip()
+    signature = (post.signature or "").strip()
+    return f"{body}\n\n{signature}" if signature else body
 
 
 def _refresh_post(s, post_id: int) -> None:
@@ -229,25 +236,31 @@ class ChanIn(BaseModel):
 class PostIn(BaseModel):
     title: str = ""
     text: str
+    signature: str = ""
     channel_ids: list[int] = Field(default_factory=list)
     mode: Literal["draft", "now", "schedule"] = "draft"
     scheduled_at: dt.datetime | None = None
     silent: bool = False
     pin: bool = False
-    view_to_delete: int | None = None
+    view_to_delete: int | None = Field(default=None, ge=1)
+    reply_to_message_id: int | None = Field(default=None, ge=1)
     media_id: int | None = None
-    repeat: str = "none"
-    repeat_count: int = 1
+    repeat: Literal["none", "daily", "weekly"] = "none"
+    repeat_count: int = Field(default=1, ge=1, le=30)
 
 
 class PostEditIn(BaseModel):
     title: str = ""
     text: str
+    signature: str = ""
     channel_ids: list[int] = Field(default_factory=list)
     mode: Literal["draft", "now", "schedule"] = "draft"
     scheduled_at: dt.datetime | None = None
     silent: bool = False
     pin: bool = False
+    view_to_delete: int | None = Field(default=None, ge=1)
+    reply_to_message_id: int | None = Field(default=None, ge=1)
+    media_id: int | None = None
 
 
 class AIIn(BaseModel):
@@ -379,6 +392,15 @@ def _create_post(b: PostIn) -> dict:
             )
         if scheduled_at <= now():
             raise HTTPException(400, "زمان انتشار باید در آینده باشد.")
+        if scheduled_at > now() + dt.timedelta(days=30):
+            raise HTTPException(400, "زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
+    if b.mode == "schedule" and b.repeat in ("daily", "weekly"):
+        last_occurrence = scheduled_at + dt.timedelta(
+            days=(1 if b.repeat == "daily" else 7)
+            * (min(max(b.repeat_count, 1), 30) - 1)
+        )
+        if last_occurrence > now() + dt.timedelta(days=30):
+            raise HTTPException(400, "تمام نوبت‌های تکرار باید در ۳۰ روز آینده باشند.")
 
     with Session() as s:
         if b.channel_ids:
@@ -390,13 +412,17 @@ def _create_post(b: PostIn) -> dict:
                 raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
         if b.media_id is not None and not s.get(MediaAsset, b.media_id):
             raise HTTPException(404, "فایل رسانه‌ای پیدا نشد.")
+        if b.view_to_delete is not None and b.view_to_delete < 1:
+            raise HTTPException(400, "تعداد بازدید برای حذف باید حداقل ۱ باشد.")
 
         p = Post(
             title=b.title,
             text=b.text,
+            signature=b.signature.strip(),
             silent=b.silent,
             pin=b.pin,
             view_to_delete=b.view_to_delete,
+            reply_to_message_id=b.reply_to_message_id,
             media_id=b.media_id,
             scheduled_at=scheduled_at,
             status={"draft": "draft", "now": "queued",
@@ -453,8 +479,12 @@ def posts(status: str | None = None):
             ).all()
             out.append({
                 "id": p.id, "title": p.title, "text": p.text,
+                "signature": p.signature,
                 "status": p.status, "scheduled_at": p.scheduled_at,
                 "silent": p.silent, "pin": p.pin,
+                "media_id": p.media_id,
+                "view_to_delete": p.view_to_delete,
+                "reply_to_message_id": p.reply_to_message_id,
                 "deliveries": [
                     {"id": d.id, "channel_id": d.channel_id,
                      "status": d.status, "error": d.error}
@@ -486,6 +516,8 @@ def edit_post(pid: int, b: PostEditIn, request: Request):
             )
         if scheduled_at <= now():
             raise HTTPException(400, "زمان انتشار باید در آینده باشد.")
+        if scheduled_at > now() + dt.timedelta(days=30):
+            raise HTTPException(400, "زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
     with Session() as s:
         if b.channel_ids:
             channel_ids = set(b.channel_ids)
@@ -494,6 +526,8 @@ def edit_post(pid: int, b: PostEditIn, request: Request):
             ))
             if available_ids != channel_ids:
                 raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
+        if b.media_id is not None and not s.get(MediaAsset, b.media_id):
+            raise HTTPException(404, "فایل رسانه‌ای پیدا نشد.")
         p = s.get(Post, pid)
         if not p:
             raise HTTPException(404, "پست پیدا نشد.")
@@ -501,8 +535,12 @@ def edit_post(pid: int, b: PostEditIn, request: Request):
             raise HTTPException(400, "فقط پیش‌نویس را می‌توان ویرایش کرد.")
         p.title = b.title.strip()
         p.text = b.text.strip()
+        p.signature = b.signature.strip()
         p.silent = b.silent
         p.pin = b.pin
+        p.view_to_delete = b.view_to_delete
+        p.reply_to_message_id = b.reply_to_message_id
+        p.media_id = b.media_id
         p.status = {
             "draft": "draft",
             "now": "queued",

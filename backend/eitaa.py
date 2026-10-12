@@ -30,26 +30,40 @@ async def _call(token: str, method: str, files=None, **data):
         j = r.json()
     except Exception as e:
         raise EitaaError(_scrub(f"ارتباط با ایتایار برقرار نشد ({type(e).__name__})", token))
-    if r.status_code != 200 or not j.get("ok", True):
-        raise EitaaError(_scrub(str(j.get("description") or j.get("message") or "خطای نامشخص از ایتایار"), token))
+    if r.status_code != 200 or not isinstance(j, dict) or j.get("ok") is not True:
+        detail = (
+            j.get("description") or j.get("message") or "خطای نامشخص از ایتایار"
+            if isinstance(j, dict) else "پاسخ نامعتبر از ایتایار"
+        )
+        raise EitaaError(_scrub(str(detail), token))
     return j
 
 async def get_me(token: str):
     return await _call(token, "getMe")
 
-async def send_message(token, chat_id, text, title="", silent=False, pin=False, view_to_delete=None):
+async def send_message(
+    token, chat_id, text, title="", silent=False, pin=False,
+    view_to_delete=None, reply_to_message_id=None,
+):
     p = dict(chat_id=chat_id, text=text)
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
-    if view_to_delete: p["view_to_delete"] = view_to_delete
+    if view_to_delete is not None: p["view_to_delete"] = view_to_delete
+    if reply_to_message_id is not None:
+        p["reply_to_message_id"] = reply_to_message_id
     return await _call(token, "sendMessage", **p)
 
-async def send_file(token, chat_id, path, filename, caption="", title="", silent=False, pin=False, view_to_delete=None):
+async def send_file(
+    token, chat_id, path, filename, caption="", title="", silent=False,
+    pin=False, view_to_delete=None, reply_to_message_id=None,
+):
     p = dict(chat_id=chat_id, caption=caption)
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
-    if view_to_delete: p["view_to_delete"] = view_to_delete
+    if view_to_delete is not None: p["view_to_delete"] = view_to_delete
+    if reply_to_message_id is not None:
+        p["reply_to_message_id"] = reply_to_message_id
     with open(path, "rb") as f:
         return await _call(token, "sendDocument", files={"file": (filename, f)}, **p)

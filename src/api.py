@@ -503,6 +503,16 @@ class Api:
         text = (body.get("text") or "").strip()
         if not text:
             raise ApiError("متن پست نمی‌تواند خالی باشد.")
+        view_threshold = body.get("view_to_delete")
+        reply_to_message_id = body.get("reply_to_message_id")
+        if view_threshold is not None and (
+            not isinstance(view_threshold, int) or view_threshold < 1
+        ):
+            raise ApiError("آستانه بازدید باید عدد صحیح مثبت باشد.")
+        if reply_to_message_id is not None and (
+            not isinstance(reply_to_message_id, int) or reply_to_message_id < 1
+        ):
+            raise ApiError("شناسه پیام باید عدد صحیح مثبت باشد.")
 
         mode = body.get("mode", "draft")
         if mode == "schedule":
@@ -519,10 +529,13 @@ class Api:
             "id": new_id,
             "title": (body.get("title") or "").strip(),
             "text": text,
+            "signature": (body.get("signature") or "").strip(),
             "status": "draft" if mode == "draft" else "queued",
             "scheduled_at": None,
             "silent": bool(body.get("silent")),
             "pin": bool(body.get("pin")),
+            "view_to_delete": body.get("view_to_delete"),
+            "reply_to_message_id": body.get("reply_to_message_id"),
             "deliveries": [
                 {
                     "id": new_id * 1000 + i,
@@ -559,13 +572,21 @@ class Api:
                     d["status"], d["error"] = "failed", "کانال یافت نشد"
                     continue
 
-                payload = {"chat_id": ch["chat_id"], "text": post["text"]}
+                message_text = post["text"].strip()
+                signature = (post.get("signature") or "").strip()
+                if signature:
+                    message_text = f"{message_text}\n\n{signature}"
+                payload = {"chat_id": ch["chat_id"], "text": message_text}
                 if post["title"]:
                     payload["title"] = post["title"]
                 if post["silent"]:
                     payload["disable_notification"] = 1
                 if post["pin"]:
                     payload["pin"] = 1
+                if post.get("view_to_delete") is not None:
+                    payload["view_to_delete"] = post["view_to_delete"]
+                if post.get("reply_to_message_id") is not None:
+                    payload["reply_to_message_id"] = post["reply_to_message_id"]
 
                 try:
                     r = await c.post(f"{_EITAA_BASE}/{token}/sendMessage",
@@ -575,13 +596,21 @@ class Api:
                     d["status"], d["error"] = "failed", "خطای ارتباط"
                     continue
 
-                if r.status_code == 200 and j.get("ok", True):
+                if (r.status_code == 200 and isinstance(j, dict)
+                        and j.get("ok") is True):
                     d["status"] = "published"
                     success += 1
                 else:
                     d["status"] = "failed"
-                    d["error"] = str(j.get("description")
-                                     or j.get("message") or "خطای نامشخص")
+                    if isinstance(j, dict):
+                        error = str(
+                            j.get("description")
+                            or j.get("message")
+                            or "خطای نامشخص"
+                        )
+                    else:
+                        error = "پاسخ نامعتبر از ایتا"
+                    d["error"] = error.replace(token, "***")
 
         post["status"] = "published" if success else "failed"
         await self._log(
@@ -629,8 +658,12 @@ class Api:
         post.update({
             "title": (body.get("title") or "").strip(),
             "text": text,
+            "signature": (body.get("signature") or "").strip(),
             "silent": bool(body.get("silent")),
             "pin": bool(body.get("pin")),
+            "view_to_delete": body.get("view_to_delete"),
+            "reply_to_message_id": body.get("reply_to_message_id"),
+            "media_id": body.get("media_id"),
             "scheduled_at": None,
             "deliveries": [
                 {

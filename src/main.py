@@ -174,6 +174,7 @@ class App:
 
         self.body = ft.Container(expand=True)
         self.api = Api(Storage(prefs))
+        self.file_picker = ft.FilePicker()
         self.server_base = self.api.base
         self.api.on_unauthorized = lambda: self.spawn(self._session_expired())
 
@@ -608,7 +609,8 @@ class App:
 
     def channel_step(self):
         """Last onboarding screen: connect the first channel."""
-        cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
+        cid = tf("شناسه یا لینک کانال/گروه",
+                 hint_text="مثلاً eitaa.com/mychannel")
         title = tf("نام نمایشی", hint_text="اختیاری")
         bot_token = ft.TextField(
             label="توکن ایتایار (در صورت نیاز)",
@@ -1103,6 +1105,7 @@ class App:
                 return self._error_view("فقط پیش‌نویس موجود را می‌توان ویرایش کرد.")
         templates = await self._safe_get("/templates", [])
         self.channels = await self._safe_get("/channels", self.channels)
+        default_signature = await self.api.storage.get("post_signature") or ""
 
         # With a single channel there is nothing to choose: pre-select it.
         draft_channel_ids = {
@@ -1145,6 +1148,107 @@ class App:
             hint_text="HH:MM",
             expand=True,
         )
+        repeat = ft.Dropdown(
+            label="تکرار",
+            value="none",
+            options=[
+                ft.dropdown.Option("none", "بدون تکرار"),
+                ft.dropdown.Option("daily", "روزانه"),
+                ft.dropdown.Option("weekly", "هفتگی"),
+            ],
+            expand=True,
+            disabled=not self.api.online or post is not None,
+        )
+        repeat_count = ft.TextField(
+            label="تعداد دفعات",
+            value="1",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=130,
+            disabled=not self.api.online or post is not None,
+        )
+        view_to_delete = ft.TextField(
+            label="حذف پس از بازدید (اختیاری)",
+            hint_text="مثلاً ۱۰۰",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            value=str((post or {}).get("view_to_delete") or ""),
+        )
+        reply_to = ft.TextField(
+            label="شناسه پیام برای پاسخ (اختیاری)",
+            hint_text="ID پیام موجود در کانال",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            value=str((post or {}).get("reply_to_message_id") or ""),
+        )
+        signature = ft.TextField(
+            label="زیرنویس یا امضای این پیام (اختیاری)",
+            hint_text="در انتهای متن فرستاده می‌شود",
+            value=(
+                post.get("signature", "")
+                if post is not None else default_signature
+            ),
+            multiline=True,
+            min_lines=2,
+            max_lines=5,
+            border_radius=14,
+        )
+        media = {
+            "id": (post or {}).get("media_id"),
+            "name": "",
+        }
+        media_status = T(
+            f"رسانه پیوست شده (شناسه {media['id']})"
+            if media["id"] else "فایلی پیوست نشده است.",
+            size=12, color=Palette.MUTED_LIGHT,
+        )
+
+        async def pick_media(e=None):
+            if not self.api.online:
+                return self.toast(
+                    "پیوست فایل نیازمند سرور برای آپلود امن فایل است.",
+                    error=True,
+                )
+            try:
+                selected = await self.file_picker.pick_files(
+                    dialog_title="انتخاب فایل برای پست",
+                    allow_multiple=False,
+                    with_data=False,
+                )
+            except (RuntimeError, OSError) as exc:
+                self.toast(f"انتخاب فایل ناموفق بود: {exc}", error=True)
+                return
+            if not selected:
+                return
+            file = selected[0]
+            if file.size > 20 * 1024 * 1024:
+                return self.toast("حداکثر اندازه فایل ۲۰ مگابایت است.", error=True)
+            try:
+                file_data = file.bytes
+                if file_data is None and file.path:
+                    file_data = await asyncio.to_thread(
+                        Path(file.path).read_bytes
+                    )
+                if not isinstance(file_data, bytes):
+                    raise OSError("محتوای فایل در دسترس نیست.")
+                uploaded = await self.api.upload(file.name, file_data)
+            except (ApiError, OSError) as exc:
+                return self.toast(str(exc), error=True)
+            if not isinstance(uploaded, dict) or not isinstance(
+                uploaded.get("id"), int
+            ):
+                return self.toast(
+                    "پاسخ آپلود معتبر نبود؛ فایل به پست پیوست نشد.",
+                    error=True,
+                )
+            media["id"] = uploaded.get("id")
+            media["name"] = uploaded.get("filename") or file.name
+            media_status.value = f"پیوست: {media['name']}"
+            self.page.update()
+
+        def clear_media(e=None):
+            media["id"] = None
+            media["name"] = ""
+            media_status.value = "فایلی پیوست نشده است."
+            self.page.update()
+
         prompt = tf("موضوع یا ایده", hint_text="مثلاً: معرفی اپلیکیشن جدید")
 
         async def run_ai(action: str):
@@ -1223,7 +1327,46 @@ class App:
                     )
                 if local_time <= dt.datetime.now():
                     return self.toast("زمان انتشار باید در آینده باشد", error=True)
+                if local_time > dt.datetime.now() + dt.timedelta(days=30):
+                    return self.toast(
+                        "زمان انتشار باید حداکثر تا ۳۰ روز آینده باشد",
+                        error=True,
+                    )
                 scheduled_at = to_utc_iso(local_time)
+
+            raw_views = (view_to_delete.value or "").strip()
+            raw_reply = (reply_to.value or "").strip()
+            raw_repeats = (repeat_count.value or "1").strip()
+            try:
+                views = int(raw_views) if raw_views else None
+                reply_id = int(raw_reply) if raw_reply else None
+                repeat_total = int(raw_repeats)
+            except ValueError:
+                return self.toast(
+                    "تعداد بازدید، شناسه پیام و دفعات تکرار باید عدد صحیح باشند.",
+                    error=True,
+                )
+            if views is not None and views < 1:
+                return self.toast("آستانه بازدید باید حداقل ۱ باشد.", error=True)
+            if reply_id is not None and reply_id < 1:
+                return self.toast("شناسه پیام باید عددی مثبت باشد.", error=True)
+            if repeat_total < 1 or repeat_total > 30:
+                return self.toast(
+                    "تعداد نوبت‌های تکرار باید بین ۱ تا ۳۰ باشد.",
+                    error=True,
+                )
+            if mode == "schedule" and repeat.value != "none":
+                interval_days = 1 if repeat.value == "daily" else 7
+                utc_now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+                utc_schedule = dt.datetime.fromisoformat(scheduled_at)
+                last_repeat = utc_schedule + dt.timedelta(
+                    days=interval_days * (repeat_total - 1)
+                )
+                if last_repeat > utc_now + dt.timedelta(days=30):
+                    return self.toast(
+                        "تمام نوبت‌های تکرار باید در ۳۰ روز آینده باشند.",
+                        error=True,
+                    )
 
             state["busy"] = True
             try:
@@ -1238,15 +1381,38 @@ class App:
                     "mode": mode,
                     "silent": state["silent"],
                     "pin": state["pin"],
+                    "view_to_delete": views,
+                    "reply_to_message_id": reply_id,
+                    "signature": (signature.value or "").strip(),
+                    "media_id": media["id"],
                 }
                 if scheduled_at:
                     payload["scheduled_at"] = scheduled_at
+                if mode == "schedule":
+                    payload["repeat"] = repeat.value or "none"
+                    payload["repeat_count"] = repeat_total
                 if post is None:
-                    await self.api.post("/posts", payload)
+                    result = await self.api.post("/posts", payload)
                 else:
-                    await self.api.put(f"/posts/{post_id}", payload)
+                    result = await self.api.put(
+                        f"/posts/{post_id}", payload
+                    )
+                if mode == "now" and isinstance(result, dict) \
+                        and result.get("status") == "failed":
+                    self.toast(
+                        "انتشار ناموفق بود؛ متن در سوابق برنامه حفظ شد.",
+                        error=True,
+                    )
+                    state["busy"] = False
+                    await self.go("posts")
+                    return
                 success = {
-                    "now": "درخواست انتشار ثبت شد",
+                    "now": (
+                        "پست منتشر شد"
+                        if isinstance(result, dict)
+                        and result.get("status") == "published"
+                        else "درخواست انتشار ثبت شد"
+                    ),
                     "schedule": "زمان‌بندی ثبت شد",
                     "draft": "تغییرات پیش‌نویس ذخیره شد" if post else "پیش‌نویس ذخیره شد",
                 }[mode]
@@ -1338,9 +1504,10 @@ class App:
                 T("زمان‌بندی انتشار", size=15,
                   weight=ft.FontWeight.BOLD,
                   color=Palette.TEXT_LIGHT),
-                T("برای انتشار خودکار باید به سرور متصل باشید.",
+                T("زمان‌بندی فقط با سرور فعال است و تا ۳۰ روز آینده انجام می‌شود.",
                   size=12, color=Palette.MUTED_LIGHT),
                 ft.Row([scheduled_date, scheduled_time], spacing=12),
+                ft.Row([repeat, repeat_count], spacing=12),
             ),
 
             ft.Container(height=12),
@@ -1354,6 +1521,59 @@ class App:
                     T("هنوز کانالی متصل نشده است",
                       size=12, color=Palette.MUTED_LIGHT),
                 ]),
+            ),
+
+            ft.Container(height=12),
+
+            # --- options ---
+            surface_card(
+                T("رسانه و پاسخ", size=15,
+                  weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                ft.Row([
+                    ft.Container(
+                        content=T("پیوست فایل", color=Palette.PRIMARY,
+                                  weight=ft.FontWeight.W_600, size=14),
+                        padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+                        alignment=ft.Alignment(0, 0),
+                        border_radius=14,
+                        border=ft.Border.all(1.5, "#E2E8F0"),
+                        ink=self.api.online,
+                        on_click=(
+                            lambda e: self.spawn(pick_media())
+                            if self.api.online else None
+                        ),
+                        opacity=1 if self.api.online else 0.5,
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        "حذف پیوست",
+                        icon=ft.Icons.CLOSE,
+                        on_click=clear_media,
+                        disabled=not media["id"],
+                    ),
+                ], spacing=8),
+                media_status,
+                *([] if self.api.online else [T(
+                    "برای آپلود فایل، اتصال به سرور لازم است.",
+                    size=11, color=Palette.MUTED_LIGHT,
+                )]),
+                reply_to,
+                signature,
+                T("شناسه پیام باید از ایتا معلوم باشد؛ برنامه تاریخچه را واکشی نمی‌کند.",
+                  size=11, color=Palette.MUTED_LIGHT),
+            ),
+
+            ft.Container(height=12),
+
+            # --- view-based deletion ---
+            surface_card(
+                T("حذف براساس بازدید", size=15,
+                  weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                view_to_delete,
+                T("این گزینه با پارامتر ایتایار ارسال می‌شود؛ اجرای آن وابسته به پشتیبانی ایتا است.",
+                  size=11, color=Palette.MUTED_LIGHT),
             ),
 
             ft.Container(height=12),
@@ -1540,6 +1760,23 @@ class App:
                                        "راهنمای اتصال",
                                        "افزودن کانال و دریافت توکن",
                                        lambda e: self.spawn(self.go("help"))),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.FORMAT_QUOTE,
+                                       "امضای پیش‌فرض پست",
+                                       "زیرنویس ذخیره‌شده روی این دستگاه",
+                                       lambda e: self.spawn(
+                                           self._signature_dialog())),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(
+                            ft.Icons.GROUP_OUTLINED,
+                            "اعضای تیم",
+                            "نقش‌ها و دسترسی کاربران",
+                            lambda e: self.spawn(self.go("team")),
+                            disabled=(
+                                not self.api.online
+                                or (self.me or {}).get("role") != "owner"
+                            ),
+                        ),
                         ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.LOGOUT,
                                        "خروج از حساب",
@@ -1799,6 +2036,142 @@ class App:
             expand=True,
         )
 
+    async def v_team(self):
+        if not self.api.online or (self.me or {}).get("role") != "owner":
+            return self._error_view(
+                "مدیریت اعضا فقط برای مالک متصل به سرور در دسترس است.",
+                "settings",
+            )
+        try:
+            members = await self.api.get("/team")
+        except ApiError as exc:
+            return self._error_view(str(exc), "settings")
+        role_names = {
+            "owner": "مالک",
+            "editor": "ویرایشگر",
+            "approver": "تأییدکننده",
+            "publisher": "ناشر",
+            "analyst": "تحلیل‌گر",
+        }
+        member_cards = []
+        for member in members:
+            controls = [
+                ft.Icon(ft.Icons.PERSON_OUTLINE,
+                        color=Palette.PRIMARY, size=22),
+                ft.Column([
+                    T(member.get("name") or member["username"],
+                      size=14, weight=ft.FontWeight.W_600),
+                    T(
+                        f"@{member['username']} · "
+                        f"{role_names.get(member['role'], member['role'])}",
+                        size=12, color=Palette.MUTED_LIGHT,
+                    ),
+                ], spacing=3, expand=True),
+            ]
+            if member.get("id") != (self.me or {}).get("id"):
+                controls.append(ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    tooltip="حذف عضو",
+                    on_click=lambda e, uid=member["id"]: self.spawn(
+                        self._remove_member(uid)),
+                ))
+            member_cards.append(ft.Container(
+                content=surface_card(ft.Row(controls, spacing=12)),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=5),
+            ))
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header(
+                    "اعضای تیم",
+                    subtitle=f"{digits(len(members))} کاربر",
+                    actions=[ft.IconButton(
+                        icon=ft.Icons.PERSON_ADD_ALT_1,
+                        icon_color="#FFFFFF",
+                        tooltip="افزودن عضو",
+                        on_click=lambda e: self._add_member_dialog(),
+                    )],
+                ),
+                ft.Container(
+                    content=T(
+                        "هر عضو حساب و رمز مستقل دارد. دسترسی‌ها با نقش "
+                        "محدود می‌شوند؛ رمز موقت را امن به کاربر برسانید.",
+                        size=12, color=Palette.MUTED_LIGHT,
+                    ),
+                    padding=ft.Padding.symmetric(horizontal=20, vertical=12),
+                ),
+                *(member_cards or [self._empty_state(
+                    "عضوی ثبت نشده", None, ft.Icons.GROUP_OUTLINED)]),
+                ft.Container(height=90),
+            ], scroll=ft.ScrollMode.AUTO, spacing=0),
+            expand=True,
+        )
+
+    def _add_member_dialog(self):
+        username = tf("نام کاربری", autofocus=True)
+        name = tf("نام نمایشی", hint_text="اختیاری")
+        password = ft.TextField(
+            label="رمز اولیه (حداقل ۸ نویسه)",
+            password=True,
+            can_reveal_password=True,
+            border_radius=14,
+        )
+        role = ft.Dropdown(
+            label="نقش",
+            value="editor",
+            options=[
+                ft.dropdown.Option("editor", "ویرایشگر"),
+                ft.dropdown.Option("approver", "تأییدکننده"),
+                ft.dropdown.Option("publisher", "ناشر"),
+                ft.dropdown.Option("analyst", "تحلیل‌گر"),
+            ],
+            border_radius=14,
+        )
+
+        async def add(e=None):
+            values = {
+                "username": (username.value or "").strip(),
+                "password": password.value or "",
+                "display_name": (name.value or "").strip(),
+                "role": role.value,
+            }
+            if not values["username"] or len(values["password"]) < 8:
+                return self.toast(
+                    "نام کاربری را وارد و رمز حداقل ۸ نویسه‌ای تعیین کنید.",
+                    error=True,
+                )
+            try:
+                await self.api.post("/team", values)
+            except ApiError as exc:
+                return self.toast(str(exc), error=True)
+            password.value = ""
+            self.page.pop_dialog()
+            self.toast("عضو تیم اضافه شد.")
+            await self.go("team")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("افزودن عضو تیم", weight=ft.FontWeight.BOLD),
+            content=ft.Column(
+                [username, name, password, role],
+                tight=True, spacing=10, scroll=ft.ScrollMode.AUTO,
+            ),
+            actions=[
+                ft.TextButton("لغو",
+                              on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("افزودن",
+                                on_click=lambda e: self.spawn(add())),
+            ],
+        ))
+
+    async def _remove_member(self, user_id: int):
+        if not await self.confirm("این عضو از فضای کاری حذف شود؟"):
+            return
+        try:
+            await self.api.delete(f"/team/{user_id}")
+        except ApiError as exc:
+            return self.toast(str(exc), error=True)
+        self.toast("عضو حذف شد.")
+        await self.go("team")
+
     async def _logout(self):
         if not self.api.token:
             self.toast("نشستی برای خروج وجود ندارد.", error=True)
@@ -1808,6 +2181,44 @@ class App:
         self.api.logout()
         self.me = None
         await self.go("auth")
+
+    async def _signature_dialog(self):
+        current = await self.api.storage.get("post_signature") or ""
+        signature = ft.TextField(
+            label="متن امضا یا زیرنویس",
+            value=current,
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+            border_radius=14,
+        )
+
+        async def save(e=None):
+            try:
+                await self.api._store_verified(
+                    "post_signature", (signature.value or "").strip()
+                )
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            self.page.pop_dialog()
+            self.toast("امضای پیش‌فرض این دستگاه ذخیره شد.")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("امضای پیش‌فرض پست", weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                T("این امضا هنگام ساخت پست جدید پیشنهاد می‌شود و در پایان "
+                  "متن منتشرشده قرار می‌گیرد. امضا فقط در این دستگاه ذخیره "
+                  "می‌شود.",
+                  size=12, color=Palette.MUTED_LIGHT),
+                signature,
+            ], tight=True, spacing=10),
+            actions=[
+                ft.TextButton("لغو",
+                              on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("ذخیره", on_click=lambda e: self.spawn(save())),
+            ],
+        ))
 
     async def _channels_sheet(self):
         rows = [
@@ -1842,7 +2253,7 @@ class App:
                         alignment=ft.Alignment(0, 0),
                         padding=ft.Padding.only(bottom=16),
                     ),
-                    T("کانال‌های متصل", size=18, weight=ft.FontWeight.BOLD),
+                    T("مقصدهای متصل", size=18, weight=ft.FontWeight.BOLD),
                     T("برای دیدن سوابق پیام‌های برنامه، یک کانال را انتخاب کنید.",
                       size=12, color=Palette.MUTED_LIGHT),
                     ft.Container(height=8),
@@ -1910,7 +2321,8 @@ class App:
         await self.go("channel_history", channel_id)
 
     async def _add_channel_dialog(self):
-        cid = tf("شناسه یا لینک کانال", hint_text="مثلاً eitaa.com/mychannel")
+        cid = tf("شناسه یا لینک کانال/گروه",
+                 hint_text="مثلاً eitaa.com/mychannel")
         title = tf("نام نمایشی", hint_text="اختیاری")
 
         async def add(e=None):
@@ -2031,6 +2443,7 @@ async def main(page: ft.Page):
     page.services.append(prefs)
 
     app = App(page, loop, prefs)
+    page.services.append(app.file_picker)
     page.add(ft.SafeArea(content=app.body, expand=True))
     await app.boot()
 

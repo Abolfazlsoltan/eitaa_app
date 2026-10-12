@@ -32,10 +32,12 @@ class Post(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200), default="")
     text: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="draft")  # draft|scheduled|queued|sending|published|failed|cancelled
     silent: Mapped[bool] = mapped_column(Boolean, default=False)
     pin: Mapped[bool] = mapped_column(Boolean, default=False)
     view_to_delete: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reply_to_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     media_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduled_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
@@ -120,7 +122,14 @@ class Automation(Base):
     require_approval: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
-MIGRATIONS = {"posts": [("media_id", "INTEGER")], "deliveries": [("done_at", "DATETIME")]}
+MIGRATIONS = {
+    "posts": [
+        ("media_id", "INTEGER"),
+        ("reply_to_message_id", "INTEGER"),
+        ("signature", "TEXT DEFAULT ''"),
+    ],
+    "deliveries": [("done_at", "DATETIME")],
+}
 def init():  # create_all + tiny additive migrations; use Alembic for production
     from sqlalchemy import text, inspect
     Base.metadata.create_all(engine)
