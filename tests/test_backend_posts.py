@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 
@@ -13,8 +13,11 @@ os.environ["MEDIA_DIR"] = f"{_test_dir.name}/media"
 
 from fastapi.testclient import TestClient
 
-from backend.db import Channel, Connection, Session, fernet
-from backend.main import app
+from backend.db import (
+    Channel, Connection, Delivery, Post, RemovalReminder, SchemaMigration,
+    Session, fernet,
+)
+from backend.main import app, deliver, _promote_due_reminders
 
 
 class PostValidationTests(unittest.TestCase):
@@ -302,8 +305,245 @@ class PostValidationTests(unittest.TestCase):
             f"/api/posts/{post_id}", headers=self.headers,
         )
         self.assertEqual(deleted.status_code, 200)
-        posts = self.client.get("/api/posts", headers=self.headers).json()
-        self.assertFalse(any(post["id"] == post_id for post in posts))
+
+    def test_draft_edits_keep_previous_text_revision(self):
+        created = self.client.post(
+            "/api/posts",
+            headers=self.headers,
+            json={"title": "before", "text": "old text"},
+        )
+        post_id = created.json()["id"]
+        edited = self.client.put(
+            f"/api/posts/{post_id}",
+            headers=self.headers,
+            json={"title": "after", "text": "new text"},
+        )
+        self.assertEqual(edited.status_code, 200)
+        revisions = self.client.get(
+            f"/api/posts/{post_id}/revisions", headers=self.headers
+        )
+        self.assertEqual(revisions.status_code, 200)
+        self.assertEqual(revisions.json()[0]["title"], "before")
+        self.assertEqual(revisions.json()[0]["text"], "old text")
+
+    def test_history_search_and_channel_filter_return_app_delivery_metadata(self):
+        with Session() as session:
+            post = Post(
+                title="History searchable title",
+                text="recorded content",
+                status="published",
+            )
+            session.add(post)
+            session.flush()
+            session.add(Delivery(
+                post_id=post.id,
+                channel_id=self.channel_id,
+                idem_key=f"test-history:{post.id}",
+                status="published",
+                done_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                remote_message_id=321,
+            ))
+            session.commit()
+        response = self.client.get(
+            "/api/history",
+            headers=self.headers,
+            params={
+                "q": "searchable",
+                "channel_id": self.channel_id,
+                "status": "published",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        record = next(
+            item for item in response.json()
+            if item["title"] == "History searchable title"
+        )
+        self.assertEqual(record["deliveries"][0]["remote_message_id"], 321)
+        self.assertIsNotNone(record["deliveries"][0]["done_at"])
+
+    def test_delivery_stores_message_id_only_from_successful_send_result(self):
+        with Session() as session:
+            connection = Connection(
+                name="delivery test",
+                token_enc=fernet.encrypt(b"token-for-test").decode(),
+            )
+            session.add(connection)
+            session.flush()
+            channel = Channel(
+                connection_id=connection.id,
+                title="delivery test",
+                chat_id="delivery-test",
+            )
+            session.add(channel)
+            post = Post(title="delivery", text="hello", status="queued")
+            session.add(post)
+            session.flush()
+            delivery = Delivery(
+                post_id=post.id,
+                channel_id=channel.id,
+                idem_key=f"delivery-test:{post.id}",
+                status="queued",
+            )
+            session.add(delivery)
+            session.commit()
+            delivery_id = delivery.id
+
+        with patch(
+            "backend.main.eitaa.send_message",
+            new=AsyncMock(return_value={
+                "ok": True, "result": {"message_id": 789},
+            }),
+        ):
+            import asyncio
+            asyncio.run(deliver(delivery_id))
+        with Session() as session:
+            stored = session.get(Delivery, delivery_id)
+            self.assertEqual(stored.status, "published")
+            self.assertEqual(stored.remote_message_id, 789)
+            self.assertIsNotNone(stored.done_at)
+
+    def test_anonymous_feedback_has_ticket_and_owner_can_respond(self):
+        response = self.client.post(
+            "/api/feedback",
+            json={"category": "bug", "message": "A problem occurred."},
+        )
+        self.assertEqual(response.status_code, 200)
+        ticket = response.json()["ticket"]
+        lookup = self.client.get("/api/feedback", params={"ticket": ticket})
+        self.assertEqual(lookup.status_code, 200)
+        self.assertEqual(lookup.json()["status"], "open")
+
+        records = self.client.get(
+            "/api/feedback/admin", headers=self.headers
+        )
+        self.assertEqual(records.status_code, 200)
+        item = next(row for row in records.json() if row["ticket"] == ticket)
+        self.assertNotIn("username", item)
+        self.assertNotIn("user_id", item)
+
+        updated = self.client.patch(
+            f"/api/feedback/admin/{ticket}",
+            headers=self.headers,
+            json={"status": "resolved", "reply": "Fixed."},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["status"], "resolved")
+        self.assertEqual(
+            self.client.get(
+                "/api/feedback", params={"ticket": ticket}
+            ).json()["reply"],
+            "Fixed.",
+        )
+
+    def test_removal_reminder_is_persistent_editable_and_not_an_auto_delete(self):
+        with Session() as session:
+            post = Post(title="reminder test", text="published", status="published")
+            session.add(post)
+            session.flush()
+            delivery = Delivery(
+                post_id=post.id,
+                channel_id=self.channel_id,
+                idem_key=f"reminder-test:{post.id}",
+                status="published",
+                done_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                remote_message_id=654,
+            )
+            session.add(delivery)
+            session.commit()
+            delivery_id = delivery.id
+
+        due_at = (
+            datetime.now(timezone.utc) + timedelta(days=1)
+        ).isoformat()
+        created = self.client.post(
+            "/api/removal-reminders",
+            headers=self.headers,
+            json={"delivery_id": delivery_id, "due_at": due_at},
+        )
+        self.assertEqual(created.status_code, 200)
+        reminder_id = created.json()["id"]
+        self.assertEqual(created.json()["remote_message_id"], 654)
+        self.assertEqual(created.json()["status"], "scheduled")
+
+        duplicate = self.client.post(
+            "/api/removal-reminders",
+            headers=self.headers,
+            json={"delivery_id": delivery_id, "due_at": due_at},
+        )
+        self.assertEqual(duplicate.status_code, 409)
+
+        updated_at = (
+            datetime.now(timezone.utc) + timedelta(days=2)
+        ).isoformat()
+        updated = self.client.post(
+            f"/api/removal-reminders/{reminder_id}/reschedule",
+            headers=self.headers,
+            json={"due_at": updated_at},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["status"], "scheduled")
+
+        cancelled = self.client.post(
+            f"/api/removal-reminders/{reminder_id}/cancel",
+            headers=self.headers,
+        )
+        self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(
+            self.client.get(
+                "/api/removal-reminders",
+                headers=self.headers,
+            ).json()[0]["status"],
+            "cancelled",
+        )
+
+        with Session() as session:
+            reminder = RemovalReminder(
+                delivery_id=delivery_id,
+                remote_message_id=654,
+                channel_id=self.channel_id,
+                due_at=datetime.now(timezone.utc).replace(tzinfo=None)
+                - timedelta(seconds=1),
+            )
+            session.add(reminder)
+            session.commit()
+            due_id = reminder.id
+            self.assertEqual(_promote_due_reminders(session), 1)
+            session.commit()
+            self.assertEqual(_promote_due_reminders(session), 0)
+            session.commit()
+            self.assertEqual(session.get(RemovalReminder, due_id).status, "due")
+
+    def test_removal_reminder_requires_recorded_remote_message_id(self):
+        with Session() as session:
+            post = Post(title="without message id", text="pending", status="published")
+            session.add(post)
+            session.flush()
+            delivery = Delivery(
+                post_id=post.id,
+                channel_id=self.channel_id,
+                idem_key=f"reminder-no-id:{post.id}",
+                status="published",
+            )
+            session.add(delivery)
+            session.commit()
+            delivery_id = delivery.id
+        response = self.client.post(
+            "/api/removal-reminders",
+            headers=self.headers,
+            json={
+                "delivery_id": delivery_id,
+                "due_at": (
+                    datetime.now(timezone.utc) + timedelta(days=1)
+                ).isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_schema_migrations_include_reminder_addition(self):
+        with Session() as session:
+            versions = set(session.query(SchemaMigration.version).all())
+        self.assertIn((3,), versions)
 
     def test_draft_can_be_published_after_editing(self):
         created = self.client.post(

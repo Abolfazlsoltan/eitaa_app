@@ -15,7 +15,7 @@ import os
 # ------------------------------------------------------------------ identity
 APP_NAME = "ایتا منیجر"
 APP_TAGLINE = "مدیریت هوشمند کانال‌های ایتا"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # ------------------------------------------------------------------- backend
 # Optional backend address. When empty, the app keeps all data on the device

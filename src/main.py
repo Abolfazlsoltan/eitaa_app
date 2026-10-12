@@ -7,7 +7,10 @@ EitaaYar, and lightweight analytics — all through a single, cohesive UI.
 from __future__ import annotations
 
 import asyncio
+import csv
 import datetime as dt
+import io
+import json
 import re
 from pathlib import Path
 
@@ -15,7 +18,7 @@ import flet as ft
 
 import config
 from api import Api, ApiError
-from fa import digits, jdate, to_utc_iso
+from fa import digits, jdate, jfull_utc, to_utc_iso
 
 
 # =================================================================== palette
@@ -76,7 +79,17 @@ AI_ACTIONS = [
     ("titles", "🏷️ عنوان", "پیشنهاد عنوان"),
     ("hashtags", "#️⃣ هشتگ", "پیشنهاد هشتگ"),
     ("proofread", "✓ اصلاح", "اصلاح نگارشی"),
+    ("summarize", "خلاصه", "خلاصه‌سازی"),
+    ("translate", "ترجمه", "ترجمه متن"),
+    ("variants", "چند نسخه", "پیشنهاد چند نسخه"),
 ]
+
+ACCENTS = {
+    "آبی": ("#0066FF", "#0047B2"),
+    "سبزآبی": ("#00897B", "#00695C"),
+    "بنفش": ("#7C4DFF", "#512DA8"),
+    "نارنجی": ("#EF6C00", "#E65100"),
+}
 
 # Tabs shown in the bottom navigation bar, in order.
 NAV_VIEWS = ["home", "posts", "templates", "settings"]
@@ -171,10 +184,12 @@ class App:
         self.channels: list = []
         self.view = "home"
         self.theme_mode = "light"
+        self.accent_name = "آبی"
 
         self.body = ft.Container(expand=True)
         self.api = Api(Storage(prefs))
         self.file_picker = ft.FilePicker()
+        self.url_launcher = ft.UrlLauncher()
         self.server_base = self.api.base
         self.api.on_unauthorized = lambda: self.spawn(self._session_expired())
 
@@ -291,6 +306,9 @@ class App:
             return self.show(self._error_view(
                 "ذخیره‌سازی برنامه در دسترس نیست. دوباره تلاش کنید.", "home"
             ))
+        theme_mode = await self.api.storage.get("appearance_theme") or "system"
+        accent_name = await self.api.storage.get("appearance_accent") or "آبی"
+        self.apply_appearance(theme_mode, accent_name)
         if self.api.online:
             try:
                 state = await self.api.auth_state()
@@ -298,6 +316,41 @@ class App:
                 return self.show(self._auth_unavailable(str(e)))
             return await self.go("auth", not state.get("has_users", False))
         await self.enter()
+
+    def apply_appearance(self, mode: str, accent_name: str) -> None:
+        if mode not in ("system", "light", "dark"):
+            mode = "system"
+        if accent_name not in ACCENTS:
+            accent_name = "آبی"
+        self.theme_mode = mode
+        self.accent_name = accent_name
+        Palette.PRIMARY, Palette.PRIMARY_DARK = ACCENTS[accent_name]
+        brightness = getattr(self.page, "platform_brightness", None)
+        dark = mode == "dark" or (
+            mode == "system" and brightness == ft.Brightness.DARK
+        )
+        Palette.SURFACE_LIGHT = "#0E1420" if dark else "#F7F9FC"
+        Palette.CARD_LIGHT = "#1A2233" if dark else "#FFFFFF"
+        Palette.TEXT_LIGHT = "#E8EEF7" if dark else "#0F172A"
+        Palette.MUTED_LIGHT = "#8DA0BF" if dark else "#64748B"
+        self.page.theme_mode = {
+            "system": ft.ThemeMode.SYSTEM,
+            "light": ft.ThemeMode.LIGHT,
+            "dark": ft.ThemeMode.DARK,
+        }[mode]
+        self.page.theme = ft.Theme(
+            color_scheme_seed=Palette.PRIMARY,
+            font_family="Vazirmatn",
+        )
+        self.page.dark_theme = ft.Theme(
+            color_scheme_seed=Palette.PRIMARY,
+            font_family="Vazirmatn",
+            color_scheme=ft.ColorScheme(
+                primary=Palette.PRIMARY,
+                surface=Palette.SURFACE_DARK,
+            ),
+        )
+        self.page.bgcolor = Palette.SURFACE_LIGHT
 
     def _logo(self, size=84):
         return ft.Container(
@@ -444,7 +497,7 @@ class App:
     def _nav_bar(self, selected: int):
         return ft.NavigationBar(
             selected_index=selected,
-            bgcolor="#FFFFFF",
+            bgcolor=Palette.CARD_LIGHT,
             indicator_color=ft.Colors.with_opacity(0.15, Palette.PRIMARY),
             on_change=lambda e: self.spawn(self.go_nav(int(e.control.selected_index))),
             destinations=[
@@ -711,10 +764,10 @@ class App:
             # ---- stats grid ----
             ft.Container(
                 content=ft.Row([
+                    self._stat_tile("کانال‌ها", stats.get("channels", 0),
+                                    ft.Icons.CAMPAIGN, Palette.PRIMARY),
                     self._stat_tile("منتشرشده", stats.get("published", 0),
                                     ft.Icons.CHECK_CIRCLE, Palette.SUCCESS),
-                    self._stat_tile("در صف", stats.get("queued", 0),
-                                    ft.Icons.SCHEDULE, Palette.WARNING),
                 ], spacing=12),
                 padding=ft.Padding.symmetric(horizontal=16),
             ),
@@ -725,6 +778,24 @@ class App:
                                     ft.Icons.ERROR_OUTLINE, Palette.DANGER),
                     self._stat_tile("هوش مصنوعی", stats.get("ai_calls", 0),
                                     ft.Icons.AUTO_AWESOME, Palette.PRIMARY),
+                    self._stat_tile("پیش‌نویس", stats.get("drafts", 0),
+                                    ft.Icons.EDIT_NOTE, Palette.PRIMARY),
+                ], spacing=12),
+                padding=ft.Padding.symmetric(horizontal=16),
+            ),
+            ft.Container(height=12),
+            ft.Container(
+                content=ft.Row([
+                    self._stat_tile("زمان‌بندی", stats.get("scheduled", 0),
+                                    ft.Icons.SCHEDULE, Palette.WARNING),
+                    self._stat_tile("در صف", stats.get("queued", 0),
+                                    ft.Icons.SCHEDULE, Palette.WARNING),
+                    self._stat_tile(
+                        "یادآوری بررسی",
+                        stats.get("removal_reminders", 0),
+                        ft.Icons.NOTIFICATIONS_OUTLINED,
+                        Palette.PRIMARY,
+                    ),
                 ], spacing=12),
                 padding=ft.Padding.symmetric(horizontal=16),
             ),
@@ -758,6 +829,8 @@ class App:
                 padding=ft.Padding.symmetric(horizontal=16),
                 on_click=lambda e: self.spawn(self.go("new")),
             ),
+            ft.Container(height=12),
+            self._parse_web_card(),
             ft.Container(height=28),
         ]
 
@@ -794,6 +867,49 @@ class App:
             content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
             expand=True,
         )
+
+    def _parse_web_card(self):
+        return ft.Container(
+            content=ft.Container(
+                content=ft.Row([
+                    ft.Container(
+                        content=ft.Icon(
+                            ft.Icons.LANGUAGE, size=24, color=Palette.PRIMARY
+                        ),
+                        width=48, height=48, border_radius=15,
+                        alignment=ft.Alignment(0, 0),
+                        bgcolor=ft.Colors.with_opacity(0.10, Palette.PRIMARY),
+                    ),
+                    ft.Column([
+                        T("Parse-Web", size=15, weight=ft.FontWeight.BOLD,
+                          color=Palette.TEXT_LIGHT),
+                        T("مشاهده وب‌سایت Parse-Web", size=12,
+                          color=Palette.MUTED_LIGHT),
+                    ], spacing=2, expand=True),
+                    ft.Icon(ft.Icons.OPEN_IN_NEW, color=Palette.PRIMARY),
+                ], spacing=12),
+                padding=16,
+                border_radius=18,
+                bgcolor=Palette.CARD_LIGHT,
+                border=ft.Border.all(
+                    1, ft.Colors.with_opacity(0.18, Palette.PRIMARY)
+                ),
+                ink=True,
+                on_click=lambda e: self.spawn(
+                    self._open_external("https://parse-web.ir")
+                ),
+            ),
+            padding=ft.Padding.symmetric(horizontal=16),
+        )
+
+    async def _open_external(self, url: str):
+        try:
+            await self.url_launcher.launch_url(
+                url, mode=ft.LaunchMode.EXTERNAL_APPLICATION
+            )
+        except Exception:
+            self.toast("بازکردن پیوند ممکن نشد؛ اتصال و مرورگر را بررسی کنید.",
+                       error=True)
 
     def _stat_tile(self, label, value, icon, color):
         return ft.Container(
@@ -854,6 +970,14 @@ class App:
         except ApiError:
             return default
 
+    async def _persist_ai_preference(self, name: str, value: str):
+        try:
+            await self.api._store_verified(
+                f"ai_preference_{name}", value or ""
+            )
+        except ApiError as exc:
+            self.toast(str(exc), error=True)
+
     # ------------------------------------------------------------- posts --
     async def v_posts(self, flt: str = "all", q: str = ""):
         posts = await self._safe_get("/posts", [])
@@ -908,6 +1032,26 @@ class App:
             ft.Container(height=16),
         ]
 
+        children.append(ft.Container(
+            content=ft.Row([
+                ft.TextButton(
+                    "خروجی JSON",
+                    icon=ft.Icons.DOWNLOAD,
+                    on_click=lambda e: self.spawn(
+                        self._export_history("json", q=q, status=flt)
+                    ),
+                ),
+                ft.TextButton(
+                    "خروجی CSV",
+                    icon=ft.Icons.TABLE_VIEW,
+                    on_click=lambda e: self.spawn(
+                        self._export_history("csv", q=q, status=flt)
+                    ),
+                ),
+            ], alignment=ft.MainAxisAlignment.END),
+            padding=ft.Padding.symmetric(horizontal=16),
+        ))
+
         # ---- list ----
         if filtered:
             children.extend(self._post_card(p, names) for p in filtered)
@@ -926,7 +1070,10 @@ class App:
 
     async def v_channel_history(self, channel_id: int):
         try:
-            posts = await self.api.get("/posts")
+            posts = await self.api.get(
+                "/history",
+                params={"channel_id": channel_id, "status": "published"},
+            )
             channels = await self.api.get("/channels")
         except ApiError as exc:
             return self._error_view(str(exc), "settings")
@@ -951,6 +1098,11 @@ class App:
                 actions=[self._header_icon(
                     ft.Icons.ARROW_FORWARD,
                     lambda e: self.spawn(self.go("settings")),
+                ), self._header_icon(
+                    ft.Icons.DOWNLOAD,
+                    lambda e: self.spawn(self._export_history(
+                        "json", channel_id=channel_id,
+                    )),
                 )],
             ),
             ft.Container(
@@ -977,6 +1129,28 @@ class App:
             content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
             expand=True,
         )
+
+    async def _export_history(
+        self, export_format: str, *, q: str = "", status: str = "all",
+        channel_id: int | None = None,
+    ):
+        try:
+            name, content = await self.api.export_history(
+                export_format,
+                query=q,
+                status=status,
+                channel_id=channel_id,
+            )
+            saved = await self.file_picker.save_file(
+                dialog_title="ذخیره خروجی تاریخچه",
+                file_name=name,
+                src_bytes=content,
+            )
+        except (ApiError, OSError, RuntimeError) as exc:
+            self.toast(f"ساخت یا ذخیره خروجی انجام نشد: {exc}", error=True)
+            return
+        if saved:
+            self.toast("خروجی تاریخچه ذخیره شد.")
 
     async def _reload_posts(self, flt, q):
         self.body.content = await self.v_posts(flt, q)
@@ -1065,6 +1239,27 @@ class App:
                         self._delete_draft(i)),
                 ),
             ], alignment=ft.MainAxisAlignment.END))
+        else:
+            actions = [
+                ft.TextButton(
+                    "جزئیات",
+                    icon=ft.Icons.INFO_OUTLINE,
+                    on_click=lambda e, p=post: self.spawn(
+                        self._show_post_details(p)
+                    ),
+                ),
+            ]
+            if status == "published":
+                actions.append(ft.TextButton(
+                    "نسخه اصلاحی",
+                    icon=ft.Icons.CONTENT_COPY,
+                    on_click=lambda e, p=post: self.spawn(
+                        self._corrected_copy(p)
+                    ),
+                ))
+            body.append(ft.Row(
+                actions, alignment=ft.MainAxisAlignment.END
+            ))
 
         return ft.Container(
             content=ft.Container(
@@ -1077,6 +1272,116 @@ class App:
             ),
             padding=ft.Padding.symmetric(horizontal=16, vertical=6),
         )
+
+    async def _show_post_details(self, post: dict):
+        revisions = post.get("revisions", [])
+        if self.api.online:
+            try:
+                revisions = await self.api.get(
+                    f"/posts/{post['id']}/revisions"
+                )
+            except ApiError:
+                revisions = []
+        delivery_lines = []
+        for delivery in post.get("deliveries", []):
+            channel = next(
+                (item for item in self.channels
+                 if item.get("id") == delivery.get("channel_id")),
+                {},
+            )
+            message_id = delivery.get("remote_message_id")
+            details = [
+                f"کانال: {channel.get('title') or delivery.get('channel_id')}",
+                f"وضعیت: {ST.get(delivery.get('status'), delivery.get('status'))}",
+                f"شناسه پیام: {message_id or 'در پاسخ API موجود نبود'}",
+                f"زمان ثبت نتیجه: {delivery.get('done_at') or '—'}",
+            ]
+            if delivery.get("error"):
+                details.append(f"خطا: {delivery['error']}")
+            line = ft.Column([
+                T("\n".join(details), size=12),
+                *(
+                    [ft.TextButton(
+                        "تنظیم یادآوری بررسی/حذف",
+                        icon=ft.Icons.NOTIFICATIONS_OUTLINED,
+                        on_click=lambda e, d=delivery: self.spawn(
+                            self._create_removal_reminder(d)
+                        ),
+                    )]
+                    if delivery.get("status") == "published"
+                    and delivery.get("remote_message_id")
+                    and self.api.online
+                    and (self.me or {}).get("role") in ("owner", "editor")
+                    else []
+                ),
+            ], spacing=2, tight=True)
+            delivery_lines.append(line)
+        self.page.show_dialog(ft.AlertDialog(
+            title=T(post.get("title") or "جزئیات پیام",
+                    weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column([
+                    T(post.get("text") or "", size=13, selectable=True),
+                    T(f"ثبت محلی: {post.get('created_at') or '—'}",
+                      size=11, color=Palette.MUTED_LIGHT),
+                    T("ارسال‌های ثبت‌شده", weight=ft.FontWeight.BOLD),
+                    *delivery_lines,
+                    T("نسخه‌های قبلی", weight=ft.FontWeight.BOLD),
+                    *[
+                        T(
+                            f"{revision.get('created_at') or '—'}: "
+                            f"{revision.get('text') or ''}",
+                            size=11, selectable=True,
+                        )
+                        for revision in revisions
+                    ],
+                    T(
+                        "این جزئیات فقط داده‌های ثبت‌شده در برنامه هستند؛ "
+                        "تاریخچه کامل کانال را نمایش نمی‌دهند.",
+                        size=11, color=Palette.MUTED_LIGHT,
+                    ),
+                ], scroll=ft.ScrollMode.AUTO, tight=True, spacing=10),
+                width=360,
+                height=420,
+            ),
+            actions=[ft.TextButton(
+                "بستن", on_click=lambda e: self.page.pop_dialog()
+            )],
+        ))
+
+    async def _corrected_copy(self, post: dict):
+        if not await self.confirm(
+            "یک پیش‌نویس تازه از این پیام بسازیم؟ "
+            "پیام منتشرشده در کانال تغییر نمی‌کند."
+        ):
+            return
+        payload = {
+            "title": post.get("title") or "",
+            "text": post.get("text") or "",
+            "signature": post.get("signature") or "",
+            "channel_ids": sorted({
+                item.get("channel_id")
+                for item in post.get("deliveries", [])
+                if isinstance(item.get("channel_id"), int)
+            }),
+            "mode": "draft",
+            "silent": bool(post.get("silent")),
+            "pin": bool(post.get("pin")),
+            "view_to_delete": post.get("view_to_delete"),
+            "reply_to_message_id": post.get("reply_to_message_id"),
+            "media_id": post.get("media_id"),
+        }
+        try:
+            created = await self.api.post("/posts", payload)
+        except ApiError as exc:
+            self.toast(str(exc), error=True)
+            return
+        if not isinstance(created, dict) or not isinstance(
+            created.get("id"), int
+        ):
+            self.toast("پیش‌نویس نسخه اصلاحی ساخته نشد.", error=True)
+            return
+        await self.go("new", created["id"])
 
     async def _cancel_post(self, post_id: int):
         if not await self.confirm("این پست لغو شود؟"):
@@ -1095,6 +1400,169 @@ class App:
         self.toast("پیش‌نویس حذف شد.")
         await self.go("posts")
 
+    async def _create_removal_reminder(self, delivery: dict):
+        local_default = dt.datetime.now() + dt.timedelta(days=1)
+        date_field = tf(
+            "تاریخ (YYYY-MM-DD)",
+            value=local_default.strftime("%Y-%m-%d"),
+        )
+        time_field = tf("ساعت (HH:MM)", value="09:00")
+
+        async def submit(_):
+            try:
+                local_time = dt.datetime.strptime(
+                    f"{date_field.value or ''} {time_field.value or ''}",
+                    "%Y-%m-%d %H:%M",
+                )
+                if local_time <= dt.datetime.now():
+                    raise ValueError
+                await self.api.post("/removal-reminders", {
+                    "delivery_id": delivery["id"],
+                    "due_at": to_utc_iso(local_time),
+                })
+            except ValueError:
+                self.toast("تاریخ یا ساعت معتبرِ آینده وارد کنید.", error=True)
+                return
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            self.page.pop_dialog()
+            self.toast("یادآوری ثبت شد؛ حذف خودکار انجام نمی‌شود.")
+            await self.go("reminders")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("یادآوری بررسی پیام", weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                T(
+                    "در موعد، یادآوری در برنامه ثبت می‌شود. "
+                    "API فعلی ایتایار حذف پیام را پشتیبانی نمی‌کند.",
+                    size=12,
+                ),
+                date_field,
+                time_field,
+            ], tight=True, spacing=10),
+            actions=[
+                ft.TextButton(
+                    "لغو", on_click=lambda e: self.page.pop_dialog()
+                ),
+                ft.TextButton("ثبت یادآوری", on_click=submit),
+            ],
+        ))
+
+    async def v_reminders(self):
+        if not self.api.online:
+            return self._error_view(
+                "مدیریت یادآوری‌ها به سرور متصل نیاز دارد. "
+                "در حالت محلی، زمان‌بندی در پس‌زمینه قابل تضمین نیست.",
+                "settings",
+            )
+        reminders = await self.api.get("/removal-reminders")
+        cards = []
+        states = {
+            "scheduled": "در انتظار موعد",
+            "due": "موعد رسیده — بررسی دستی لازم است",
+            "cancelled": "لغوشده",
+        }
+        for reminder in reminders:
+            due_at = reminder.get("due_at")
+            try:
+                due_text = jfull_utc(due_at) if due_at else "—"
+            except (TypeError, ValueError):
+                due_text = str(due_at or "—")
+
+            async def cancel(_event, item=reminder):
+                if not await self.confirm("این یادآوری لغو شود؟"):
+                    return
+                try:
+                    await self.api.post(
+                        f"/removal-reminders/{item['id']}/cancel"
+                    )
+                except ApiError as exc:
+                    self.toast(str(exc), error=True)
+                    return
+                await self.go("reminders")
+
+            async def reschedule(_event, item=reminder):
+                date_field = tf("تاریخ (YYYY-MM-DD)")
+                time_field = tf("ساعت (HH:MM)", value="09:00")
+
+                async def submit(_):
+                    try:
+                        new_time = dt.datetime.strptime(
+                            f"{date_field.value or ''} "
+                            f"{time_field.value or ''}",
+                            "%Y-%m-%d %H:%M",
+                        )
+                        if new_time <= dt.datetime.now():
+                            raise ValueError
+                        await self.api.post(
+                            f"/removal-reminders/{item['id']}/reschedule",
+                            {"due_at": to_utc_iso(new_time)},
+                        )
+                    except ValueError:
+                        self.toast(
+                            "تاریخ یا ساعت معتبرِ آینده وارد کنید.",
+                            error=True,
+                        )
+                        return
+                    except ApiError as exc:
+                        self.toast(str(exc), error=True)
+                        return
+                    self.page.pop_dialog()
+                    await self.go("reminders")
+
+                self.page.show_dialog(ft.AlertDialog(
+                    title=T("تغییر زمان یادآوری"),
+                    content=ft.Column(
+                        [date_field, time_field], tight=True, spacing=10
+                    ),
+                    actions=[
+                        ft.TextButton(
+                            "لغو", on_click=lambda e: self.page.pop_dialog()
+                        ),
+                        ft.TextButton("ذخیره", on_click=submit),
+                    ],
+                ))
+
+            controls = [
+                T(
+                    f"{reminder.get('channel_title') or 'کانال'} · "
+                    f"پیام {reminder.get('remote_message_id')}",
+                    size=14, weight=ft.FontWeight.W_600,
+                ),
+                T(f"{states.get(reminder.get('status'), 'نامشخص')} · {due_text}",
+                  size=12, color=Palette.MUTED_LIGHT),
+            ]
+            if reminder.get("status") in ("scheduled", "due"):
+                controls.append(ft.Row([
+                    ft.TextButton("تغییر زمان", on_click=reschedule),
+                    ft.TextButton("لغو", on_click=cancel),
+                ], alignment=ft.MainAxisAlignment.END))
+            cards.append(surface_card(*controls))
+
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header(
+                    "یادآوری‌های پیام",
+                    subtitle="یادآوری دستی؛ نه حذف خودکار",
+                ),
+                ft.Container(height=16),
+                T(
+                    "حذف پیام از طریق API ایتایار فعلی در دسترس نیست. "
+                    "وقتی موعد برسد، وضعیت یادآوری تغییر می‌کند تا "
+                    "پیام را دستی بررسی کنید.",
+                    size=12, color=Palette.MUTED_LIGHT,
+                ),
+                *(cards if cards else [
+                    T("یادآوری‌ای ثبت نشده است.", size=13,
+                      color=Palette.MUTED_LIGHT)
+                ]),
+                ft.Container(height=90),
+            ], scroll=ft.ScrollMode.AUTO, spacing=12),
+            padding=ft.Padding.symmetric(horizontal=16),
+            expand=True,
+        )
+
     # -------------------------------------------------------- new post -----
     async def v_new(self, post_id: int | None = None):
         post = None
@@ -1106,6 +1574,10 @@ class App:
         templates = await self._safe_get("/templates", [])
         self.channels = await self._safe_get("/channels", self.channels)
         default_signature = await self.api.storage.get("post_signature") or ""
+        ai_preferences = {
+            name: await self.api.storage.get(f"ai_preference_{name}")
+            for name in ("language", "tone", "length")
+        }
 
         # With a single channel there is nothing to choose: pre-select it.
         draft_channel_ids = {
@@ -1250,6 +1722,46 @@ class App:
             self.page.update()
 
         prompt = tf("موضوع یا ایده", hint_text="مثلاً: معرفی اپلیکیشن جدید")
+        ai_language = ft.Dropdown(
+            label="زبان",
+            value=ai_preferences["language"] or "fa",
+            options=[
+                ft.dropdown.Option("fa", "فارسی"),
+                ft.dropdown.Option("en", "English"),
+                ft.dropdown.Option("ar", "العربية"),
+            ],
+            expand=True,
+            on_change=lambda e: self.spawn(self._persist_ai_preference(
+                "language", e.control.value
+            )),
+        )
+        ai_tone = ft.Dropdown(
+            label="لحن",
+            value=ai_preferences["tone"] or "neutral",
+            options=[
+                ft.dropdown.Option("neutral", "متعادل"),
+                ft.dropdown.Option("formal", "رسمی"),
+                ft.dropdown.Option("friendly", "دوستانه"),
+                ft.dropdown.Option("news", "خبری"),
+            ],
+            expand=True,
+            on_change=lambda e: self.spawn(self._persist_ai_preference(
+                "tone", e.control.value
+            )),
+        )
+        ai_length = ft.Dropdown(
+            label="طول متن",
+            value=ai_preferences["length"] or "medium",
+            options=[
+                ft.dropdown.Option("short", "کوتاه"),
+                ft.dropdown.Option("medium", "متوسط"),
+                ft.dropdown.Option("long", "مفصل"),
+            ],
+            expand=True,
+            on_change=lambda e: self.spawn(self._persist_ai_preference(
+                "length", e.control.value
+            )),
+        )
 
         async def run_ai(action: str):
             if state["busy"]:
@@ -1259,6 +1771,9 @@ class App:
                 result = await self.api.ai(
                     action, text.value or "",
                     (prompt.value or "") if action == "create" else "",
+                    language=ai_language.value or "fa",
+                    tone=ai_tone.value or "neutral",
+                    length=ai_length.value or "medium",
                 )
                 if action in ("titles", "hashtags"):
                     self.page.show_dialog(ft.AlertDialog(
@@ -1445,7 +1960,7 @@ class App:
                           color=Palette.TEXT_LIGHT),
                 padding=ft.Padding.symmetric(horizontal=14, vertical=8),
                 border_radius=12,
-                bgcolor="#F1F5F9",
+                bgcolor=Palette.CARD_LIGHT,
                 ink=True,
                 on_click=fill_template(t),
             )
@@ -1484,6 +1999,7 @@ class App:
                 ]),
                 ft.Container(height=4),
                 prompt,
+                ft.Row([ai_language, ai_tone, ai_length], spacing=8),
                 ft.Row([
                     btn_primary("✨ بساز",
                                 lambda e: self.spawn(run_ai("create"))),
@@ -1760,6 +2276,35 @@ class App:
                                        "راهنمای اتصال",
                                        "افزودن کانال و دریافت توکن",
                                        lambda e: self.spawn(self.go("help"))),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.TUNE,
+                                       "ظاهر برنامه",
+                                       "تم و رنگ تأکیدی",
+                                       lambda e: self.spawn(
+                                           self._appearance_dialog())),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.FEEDBACK_OUTLINED,
+                                       "پیشنهاد و گزارش مشکل",
+                                       "ارسال ناشناس و پیگیری با شماره",
+                                       lambda e: self.spawn(
+                                           self.go("feedback"))),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(
+                            ft.Icons.NOTIFICATIONS_OUTLINED,
+                            "یادآوری پیام‌ها",
+                            "زمان‌بندی بررسی دستی؛ حذف خودکار پشتیبانی نمی‌شود",
+                            lambda e: self.spawn(self.go("reminders")),
+                            disabled=(
+                                not self.api.online
+                                or (self.me or {}).get("role")
+                                not in ("owner", "editor")
+                            ),
+                        ),
+                        ft.Divider(height=1, color="#F1F5F9"),
+                        self._menu_row(ft.Icons.SYSTEM_UPDATE_ALT,
+                                       "بررسی به‌روزرسانی",
+                                       "نسخه پایدار منتشرشده در GitHub",
+                                       lambda e: self.spawn(self.go("updates"))),
                         ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.FORMAT_QUOTE,
                                        "امضای پیش‌فرض پست",
@@ -2320,6 +2865,310 @@ class App:
         self.page.pop_dialog()
         await self.go("channel_history", channel_id)
 
+    async def _appearance_dialog(self):
+        theme = ft.Dropdown(
+            label="تم",
+            value=self.theme_mode,
+            options=[
+                ft.dropdown.Option("system", "پیروی از سیستم"),
+                ft.dropdown.Option("light", "روشن"),
+                ft.dropdown.Option("dark", "تاریک"),
+            ],
+        )
+        accent = ft.Dropdown(
+            label="رنگ تأکیدی",
+            value=self.accent_name,
+            options=[ft.dropdown.Option(value, value) for value in ACCENTS],
+        )
+
+        async def save(e=None):
+            try:
+                await self.api._store_verified(
+                    "appearance_theme", theme.value or "system"
+                )
+                await self.api._store_verified(
+                    "appearance_accent", accent.value or "آبی"
+                )
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            self.apply_appearance(theme.value or "system",
+                                  accent.value or "آبی")
+            self.page.pop_dialog()
+            await self.go(self.view if self.view in NAV_VIEWS else "settings")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("ظاهر برنامه", weight=ft.FontWeight.BOLD),
+            content=ft.Column([
+                theme,
+                accent,
+                T("تنظیمات ظاهر فقط روی همین دستگاه ذخیره می‌شود.",
+                  size=11, color=Palette.MUTED_LIGHT),
+            ], tight=True, spacing=12),
+            actions=[
+                ft.TextButton("لغو",
+                              on_click=lambda e: self.page.pop_dialog()),
+                ft.FilledButton("ذخیره",
+                                on_click=lambda e: self.spawn(save())),
+            ],
+        ))
+
+    async def v_updates(self):
+        try:
+            release = await self.api.latest_release()
+        except ApiError as exc:
+            return ft.Container(
+                content=ft.Column([
+                    self.gradient_header("به‌روزرسانی"),
+                    surface_card(
+                        T("اطلاعات انتشار دریافت نشد.", size=15,
+                          weight=ft.FontWeight.BOLD),
+                        T(str(exc), size=12, color=Palette.MUTED_LIGHT),
+                        btn_ghost(
+                            "تلاش دوباره",
+                            lambda e: self.spawn(self.go("updates")),
+                        ),
+                    ),
+                ], spacing=16, scroll=ft.ScrollMode.AUTO),
+                padding=16,
+                expand=True,
+            )
+
+        current = tuple(int(part) for part in re.findall(
+            r"\d+", config.VERSION
+        )[:3])
+        latest = tuple(int(part) for part in re.findall(
+            r"\d+", release["tag"]
+        )[:3])
+        has_update = latest > current
+        target_url = release.get("apk_url") or release["url"]
+        notes = release.get("notes") or "یادداشت انتشار ثبت نشده است."
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header(
+                    "به‌روزرسانی",
+                    subtitle=f"نسخه فعلی {config.VERSION}",
+                ),
+                ft.Container(
+                    content=surface_card(
+                        T(
+                            f"{release['name']} ({release['tag']})",
+                            size=16, weight=ft.FontWeight.BOLD,
+                            color=Palette.TEXT_LIGHT,
+                        ),
+                        pill(
+                            "نسخه جدید موجود است" if has_update
+                            else "نسخه پایدار بررسی شد",
+                            Palette.SUCCESS if has_update else Palette.PRIMARY,
+                        ),
+                        T(notes, size=12, color=Palette.MUTED_LIGHT,
+                          selectable=True),
+                        btn_primary(
+                            "دریافت APK در مرورگر"
+                            if release.get("apk_url")
+                            else "مشاهده انتشار",
+                            lambda e: self.spawn(
+                                self._open_external(target_url)
+                            ),
+                            expand=True,
+                        ),
+                        T(
+                            "دانلود و نصب از مرورگر Android انجام می‌شود؛ "
+                            "این برنامه دانلود پس‌زمینه یا نصب خودکار را "
+                            "ادعا نمی‌کند. Android تأیید نصب را از شما می‌خواهد.",
+                            size=11, color=Palette.MUTED_LIGHT,
+                        ),
+                    ),
+                    padding=16,
+                ),
+            ], scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
+
+    async def v_feedback(self):
+        if not self.api.online:
+            return ft.Container(
+                content=ft.Column([
+                    self.gradient_header("پیشنهاد و گزارش مشکل"),
+                    surface_card(
+                        T("ارسال و پیگیری بازخورد به سرور نیاز دارد.",
+                          size=14, weight=ft.FontWeight.BOLD),
+                        T("در حالت محلی، بازخوردی از دستگاه خارج نمی‌شود "
+                          "و شماره پیگیری جعلی ساخته نخواهد شد.",
+                          size=12, color=Palette.MUTED_LIGHT),
+                        btn_ghost(
+                            "تلاش برای اتصال سرور",
+                            lambda e: self.spawn(self._retry_backend()),
+                        ),
+                    ),
+                ], spacing=16, scroll=ft.ScrollMode.AUTO),
+                padding=16,
+                expand=True,
+            )
+        category = ft.Dropdown(
+            label="نوع بازخورد",
+            value="suggestion",
+            options=[
+                ft.dropdown.Option("suggestion", "پیشنهاد"),
+                ft.dropdown.Option("complaint", "انتقاد"),
+                ft.dropdown.Option("bug", "گزارش مشکل"),
+            ],
+        )
+        message = ft.TextField(
+            label="پیام",
+            multiline=True,
+            min_lines=4,
+            max_lines=8,
+            max_length=4000,
+        )
+        ticket = tf("شماره پیگیری برای بررسی پاسخ")
+        result_text = T("", size=12, color=Palette.MUTED_LIGHT)
+
+        async def submit(e=None):
+            content = (message.value or "").strip()
+            if len(content) < 5:
+                return self.toast("پیام باید دست‌کم ۵ نویسه باشد.", error=True)
+            try:
+                result = await self.api.post("/feedback", {
+                    "category": category.value,
+                    "message": content,
+                })
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            if not isinstance(result, dict) or not result.get("ticket"):
+                return self.toast(
+                    "پاسخ سرور شماره پیگیری معتبر نداشت.", error=True
+                )
+            ticket.value = result["ticket"]
+            message.value = ""
+            result_text.value = (
+                f"ثبت شد. شماره پیگیری را نگه دارید: {ticket.value}"
+            )
+            self.page.update()
+
+        async def lookup(e=None):
+            code = (ticket.value or "").strip()
+            if not code:
+                return self.toast("شماره پیگیری را وارد کنید.", error=True)
+            try:
+                result = await self.api.get(
+                    "/feedback", params={"ticket": code}
+                )
+            except ApiError as exc:
+                result_text.value = str(exc)
+                self.page.update()
+                return
+            statuses = {
+                "open": "باز",
+                "in_progress": "در حال بررسی",
+                "resolved": "پاسخ داده‌شده",
+            }
+            result_text.value = (
+                f"وضعیت: {statuses.get(result.get('status'), 'نامشخص')}\n"
+                f"پاسخ: {result.get('reply') or 'هنوز پاسخی ثبت نشده است.'}"
+            )
+            self.page.update()
+
+        children = [
+            self.gradient_header("پیشنهاد و گزارش مشکل"),
+            ft.Container(
+                content=surface_card(
+                    T("ارسال بدون نام و اطلاعات حساب",
+                      size=15, weight=ft.FontWeight.BOLD,
+                      color=Palette.TEXT_LIGHT),
+                    T("نام کاربری، شناسه حساب و IP در رکورد بازخورد ذخیره "
+                      "نمی‌شوند. شماره پیگیری را برای دریافت پاسخ نگه دارید.",
+                      size=11, color=Palette.MUTED_LIGHT),
+                    category,
+                    message,
+                    btn_primary("ارسال بازخورد", submit, expand=True),
+                    ft.Divider(),
+                    ticket,
+                    btn_ghost("پیگیری", lookup, expand=True),
+                    result_text,
+                ),
+                padding=16,
+            ),
+        ]
+        if (self.me or {}).get("role") == "owner":
+            children.append(ft.Container(
+                content=btn_ghost(
+                    "مدیریت بازخوردهای دریافتی",
+                    lambda e: self.spawn(self._show_feedback_admin()),
+                    expand=True,
+                ),
+                padding=16,
+            ))
+        return ft.Container(
+            content=ft.Column(children, scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
+
+    async def _show_feedback_admin(self):
+        try:
+            feedback = await self.api.get("/feedback/admin")
+        except ApiError as exc:
+            self.toast(str(exc), error=True)
+            return
+        items = []
+        for entry in feedback:
+            status = ft.Dropdown(
+                label="وضعیت",
+                value=entry.get("status", "open"),
+                options=[
+                    ft.dropdown.Option("open", "باز"),
+                    ft.dropdown.Option("in_progress", "در حال بررسی"),
+                    ft.dropdown.Option("resolved", "پاسخ داده‌شده"),
+                ],
+            )
+            reply = ft.TextField(
+                label="پاسخ (اختیاری)",
+                value=entry.get("reply") or "",
+                multiline=True,
+                min_lines=1,
+                max_lines=3,
+            )
+
+            async def save_item(code=entry["ticket"], state=status, answer=reply):
+                try:
+                    await self.api.patch(
+                        f"/feedback/admin/{code}",
+                        {"status": state.value, "reply": answer.value or ""},
+                    )
+                except ApiError as exc:
+                    self.toast(str(exc), error=True)
+                else:
+                    self.toast(f"پاسخ {code} به‌روز شد.")
+
+            items.append(surface_card(
+                T(
+                    f"{entry['ticket']} · {entry.get('category', '')}",
+                    weight=ft.FontWeight.BOLD,
+                ),
+                T(entry.get("message", ""), size=12, selectable=True),
+                status,
+                reply,
+                ft.TextButton(
+                    "ذخیره پاسخ و وضعیت",
+                    on_click=lambda e, callback=save_item:
+                    self.spawn(callback()),
+                ),
+            ))
+        if not items:
+            items.append(T("بازخوردی ثبت نشده است.",
+                           color=Palette.MUTED_LIGHT))
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("مدیریت بازخورد", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column(items, scroll=ft.ScrollMode.AUTO),
+                width=360, height=480,
+            ),
+            actions=[ft.TextButton(
+                "بستن", on_click=lambda e: self.page.pop_dialog()
+            )],
+        ))
+
     async def _add_channel_dialog(self):
         cid = tf("شناسه یا لینک کانال/گروه",
                  hint_text="مثلاً eitaa.com/mychannel")
@@ -2357,6 +3206,27 @@ class App:
                 ft.Container(height=8),
                 T(f"نسخه {digits(config.VERSION)}", size=12,
                   color=Palette.MUTED_LIGHT, text_align=ft.TextAlign.CENTER),
+                T("مدیریت محتوای کانال‌های ایتا با ابزارهای انتشار و AI.",
+                  size=12, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                T("تغییرات این نسخه: تاریخچه و خروجی، نسخه‌های قبلی، "
+                  "پیگیری بازخورد، تنظیم ظاهر و ابزارهای تولید محتوا.",
+                  size=11, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                ft.TextButton(
+                    "مخزن GitHub",
+                    icon=ft.Icons.CODE,
+                    on_click=lambda e: self.spawn(self._open_external(
+                        "https://github.com/Abolfazlsoltan/eitaa_app"
+                    )),
+                ),
+                ft.TextButton(
+                    "گزارش اشکال در GitHub",
+                    icon=ft.Icons.BUG_REPORT_OUTLINED,
+                    on_click=lambda e: self.spawn(self._open_external(
+                        "https://github.com/Abolfazlsoltan/eitaa_app/issues"
+                    )),
+                ),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                spacing=4, tight=True),
             actions=[ft.TextButton("بستن",
@@ -2427,7 +3297,7 @@ async def main(page: ft.Page):
     page.title = config.APP_NAME
     page.rtl = True
     page.padding = 0
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme_mode = ft.ThemeMode.SYSTEM
     page.theme = ft.Theme(
         color_scheme_seed=Palette.PRIMARY,
         font_family="Vazirmatn",
@@ -2444,6 +3314,11 @@ async def main(page: ft.Page):
 
     app = App(page, loop, prefs)
     page.services.append(app.file_picker)
+    page.services.append(app.url_launcher)
+    page.on_platform_brightness_change = lambda e: (
+        app.apply_appearance(app.theme_mode, app.accent_name),
+        page.update(),
+    )
     page.add(ft.SafeArea(content=app.body, expand=True))
     await app.boot()
 

@@ -11,16 +11,20 @@ Start with:
 from __future__ import annotations
 
 import asyncio
+import csv
 import datetime as dt
+import io
 import os
 import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import (
+    FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sql_delete, func, select, update
 
@@ -32,8 +36,11 @@ from .db import (
     Channel,
     Connection,
     Delivery,
+    Feedback,
     MediaAsset,
     Post,
+    PostRevision,
+    RemovalReminder,
     Session,
     Template,
     User,
@@ -84,6 +91,8 @@ async def worker() -> None:
                 )).all():
                     d.status = "queued"
 
+                _promote_due_reminders(s)
+
                 due_ids = s.scalars(
                     select(Delivery.id)
                     .where(Delivery.status == "queued", Delivery.run_at <= now())
@@ -98,6 +107,38 @@ async def worker() -> None:
         except Exception as e:
             print("worker error:", type(e).__name__, e)
         await asyncio.sleep(5)
+
+
+def _promote_due_reminders(s, at: dt.datetime | None = None) -> int:
+    at = at or now()
+    reminder_ids = s.scalars(
+        select(RemovalReminder.id).where(
+            RemovalReminder.status == "scheduled",
+            RemovalReminder.due_at <= at,
+        )
+    ).all()
+    promoted = 0
+    for reminder_id in reminder_ids:
+        claimed = s.execute(
+            update(RemovalReminder)
+            .where(
+                RemovalReminder.id == reminder_id,
+                RemovalReminder.status == "scheduled",
+                RemovalReminder.due_at <= at,
+            )
+            .values(status="due", updated_at=at)
+        ).rowcount
+        if not claimed:
+            continue
+        reminder = s.get(RemovalReminder, reminder_id)
+        log(
+            s,
+            "removal_reminder",
+            f"یادآوری بررسی پیام {reminder.remote_message_id} "
+            "موعدش رسیده است؛ حذف خودکار توسط API پشتیبانی نمی‌شود.",
+        )
+        promoted += 1
+    return promoted
 
 
 async def deliver(delivery_id: int) -> None:
@@ -122,18 +163,25 @@ async def deliver(delivery_id: int) -> None:
         try:
             m = s.get(MediaAsset, p.media_id) if p.media_id else None
             if m:
-                await eitaa.send_file(
+                response = await eitaa.send_file(
                     token, ch.chat_id,
                     os.path.join(MEDIA_DIR, m.stored_name), m.filename,
                     _post_content(p), p.title, p.silent, p.pin, p.view_to_delete,
                     p.reply_to_message_id,
                 )
             else:
-                await eitaa.send_message(
+                response = await eitaa.send_message(
                     token, ch.chat_id, _post_content(p), p.title,
                     p.silent, p.pin, p.view_to_delete,
                     p.reply_to_message_id,
                 )
+            result = response.get("result")
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            d.remote_message_id = (
+                message_id if isinstance(message_id, int)
+                and not isinstance(message_id, bool) and message_id > 0
+                else None
+            )
             d.status, d.error, d.done_at = "published", "", now()
             log(s, "publish", f"«{p.title or p.id}» در {ch.title} منتشر شد")
         except eitaa.EitaaError as e:
@@ -263,10 +311,32 @@ class PostEditIn(BaseModel):
     media_id: int | None = None
 
 
+class FeedbackIn(BaseModel):
+    category: Literal["suggestion", "complaint", "bug"]
+    message: str = Field(min_length=5, max_length=4000)
+
+
+class FeedbackUpdateIn(BaseModel):
+    status: Literal["open", "in_progress", "resolved"]
+    reply: str = Field(default="", max_length=4000)
+
+
+class RemovalReminderIn(BaseModel):
+    delivery_id: int = Field(ge=1)
+    due_at: dt.datetime
+
+
+class RemovalReminderTimeIn(BaseModel):
+    due_at: dt.datetime
+
+
 class AIIn(BaseModel):
     action: str
     text: str = ""
     prompt: str = ""
+    language: Literal["fa", "en", "ar"] = "fa"
+    tone: Literal["neutral", "formal", "friendly", "news"] = "neutral"
+    length: Literal["short", "medium", "long"] = "medium"
 
 
 class TplIn(BaseModel):
@@ -466,32 +536,96 @@ def create_post(b: PostIn, request: Request):
     return res
 
 
+def _post_record(s, p: Post) -> dict:
+    deliveries = s.scalars(
+        select(Delivery).where(Delivery.post_id == p.id)
+    ).all()
+    return {
+        "id": p.id,
+        "title": p.title,
+        "text": p.text,
+        "signature": p.signature,
+        "status": p.status,
+        "scheduled_at": p.scheduled_at,
+        "created_at": p.created_at,
+        "updated_at": p.updated_at,
+        "silent": p.silent,
+        "pin": p.pin,
+        "media_id": p.media_id,
+        "view_to_delete": p.view_to_delete,
+        "reply_to_message_id": p.reply_to_message_id,
+        "deliveries": [
+            {
+                "id": d.id,
+                "channel_id": d.channel_id,
+                "status": d.status,
+                "error": d.error,
+                "done_at": d.done_at,
+                "remote_message_id": d.remote_message_id,
+            }
+            for d in deliveries
+        ],
+    }
+
+
 @app.get("/api/posts")
 def posts(status: str | None = None):
     with Session() as s:
         q = select(Post).order_by(Post.id.desc())
         if status:
             q = q.where(Post.status == status)
-        out = []
-        for p in s.scalars(q):
-            ds = s.scalars(
-                select(Delivery).where(Delivery.post_id == p.id)
-            ).all()
-            out.append({
-                "id": p.id, "title": p.title, "text": p.text,
-                "signature": p.signature,
-                "status": p.status, "scheduled_at": p.scheduled_at,
-                "silent": p.silent, "pin": p.pin,
-                "media_id": p.media_id,
-                "view_to_delete": p.view_to_delete,
-                "reply_to_message_id": p.reply_to_message_id,
-                "deliveries": [
-                    {"id": d.id, "channel_id": d.channel_id,
-                     "status": d.status, "error": d.error}
-                    for d in ds
-                ],
-            })
-        return out
+        return [_post_record(s, p) for p in s.scalars(q)]
+
+
+@app.get("/api/history")
+def history(
+    q: str = "",
+    status: str = "published",
+    channel_id: int | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    with Session() as s:
+        statement = (
+            select(Post)
+            .join(Delivery, Delivery.post_id == Post.id)
+            .join(Channel, Channel.id == Delivery.channel_id)
+            .order_by(Post.id.desc())
+            .distinct()
+        )
+        if status and status != "all":
+            statement = statement.where(Delivery.status == status)
+        if channel_id is not None:
+            statement = statement.where(Delivery.channel_id == channel_id)
+        needle = q.strip()
+        if needle:
+            statement = statement.where(
+                Post.title.ilike(f"%{needle}%")
+                | Post.text.ilike(f"%{needle}%")
+                | Channel.title.ilike(f"%{needle}%")
+                | Channel.chat_id.ilike(f"%{needle}%")
+            )
+        statement = statement.offset(offset).limit(limit)
+        return [_post_record(s, p) for p in s.scalars(statement)]
+
+
+@app.get("/api/posts/{pid}/revisions")
+def post_revisions(pid: int):
+    with Session() as s:
+        if not s.get(Post, pid):
+            raise HTTPException(404, "پست پیدا نشد.")
+        revisions = s.scalars(
+            select(PostRevision)
+            .where(PostRevision.post_id == pid)
+            .order_by(PostRevision.id.desc())
+        ).all()
+        return [{
+            "id": revision.id,
+            "title": revision.title,
+            "text": revision.text,
+            "signature": revision.signature,
+            "created_at": revision.created_at,
+        } for revision in revisions]
 
 
 @app.put("/api/posts/{pid}")
@@ -533,9 +667,21 @@ def edit_post(pid: int, b: PostEditIn, request: Request):
             raise HTTPException(404, "پست پیدا نشد.")
         if p.status != "draft":
             raise HTTPException(400, "فقط پیش‌نویس را می‌توان ویرایش کرد.")
+        if (
+            p.title != b.title.strip()
+            or p.text != b.text.strip()
+            or (p.signature or "") != b.signature.strip()
+        ):
+            s.add(PostRevision(
+                post_id=p.id,
+                title=p.title,
+                text=p.text,
+                signature=p.signature or "",
+            ))
         p.title = b.title.strip()
         p.text = b.text.strip()
         p.signature = b.signature.strip()
+        p.updated_at = now()
         p.silent = b.silent
         p.pin = b.pin
         p.view_to_delete = b.view_to_delete
@@ -675,13 +821,202 @@ def stats():
             select(func.count()).select_from(Delivery).where(
                 Delivery.status.in_(st))
         ) or 0
+        reminder_count = s.scalar(
+            select(func.count()).select_from(RemovalReminder).where(
+                RemovalReminder.status == "scheduled"
+            )
+        ) or 0
         return {
             "published": c("published"),
             "failed": c("failed"),
             "scheduled": c("scheduled"),
             "queued": c("queued", "sending"),
             "ai_calls": s.scalar(select(func.count()).select_from(AIUsage)) or 0,
+            "channels": s.scalar(
+                select(func.count()).select_from(Channel)
+            ) or 0,
+            "drafts": s.scalar(
+                select(func.count()).select_from(Post).where(
+                    Post.status == "draft"
+                )
+            ) or 0,
+            "removal_reminders": reminder_count,
         }
+
+
+def _reminder_record(s, reminder: RemovalReminder) -> dict:
+    channel = s.get(Channel, reminder.channel_id)
+    return {
+        "id": reminder.id,
+        "delivery_id": reminder.delivery_id,
+        "remote_message_id": reminder.remote_message_id,
+        "channel_id": reminder.channel_id,
+        "channel_title": channel.title if channel else "",
+        "due_at": reminder.due_at,
+        "status": reminder.status,
+        "created_at": reminder.created_at,
+        "updated_at": reminder.updated_at,
+    }
+
+
+@app.get("/api/removal-reminders")
+def removal_reminders(status: str = "all"):
+    with Session() as s:
+        query = select(RemovalReminder).order_by(RemovalReminder.due_at)
+        if status != "all":
+            query = query.where(RemovalReminder.status == status)
+        return [
+            _reminder_record(s, item)
+            for item in s.scalars(query.limit(500))
+        ]
+
+
+@app.post("/api/removal-reminders")
+def create_removal_reminder(b: RemovalReminderIn):
+    due_at = b.due_at
+    if due_at.tzinfo is not None:
+        due_at = due_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    if due_at <= now():
+        raise HTTPException(400, "زمان یادآوری باید در آینده باشد.")
+    with Session() as s:
+        delivery = s.get(Delivery, b.delivery_id)
+        if (
+            not delivery or delivery.status != "published"
+            or not delivery.remote_message_id
+        ):
+            raise HTTPException(
+                400,
+                "فقط پیام منتشرشده با شناسه پیام ثبت‌شده قابل یادآوری است.",
+            )
+        existing = s.scalar(select(RemovalReminder).where(
+            RemovalReminder.delivery_id == delivery.id,
+            RemovalReminder.status == "scheduled",
+        ))
+        if existing:
+            raise HTTPException(
+                409, "برای این پیام یادآوری فعال وجود دارد."
+            )
+        reminder = RemovalReminder(
+            delivery_id=delivery.id,
+            remote_message_id=delivery.remote_message_id,
+            channel_id=delivery.channel_id,
+            due_at=due_at,
+        )
+        s.add(reminder)
+        log(
+            s, "removal_reminder",
+            f"یادآوری دستی برای پیام {delivery.remote_message_id} ثبت شد",
+        )
+        s.commit()
+        return _reminder_record(s, reminder)
+
+
+@app.post("/api/removal-reminders/{reminder_id}/reschedule")
+def reschedule_removal_reminder(
+    reminder_id: int, b: RemovalReminderTimeIn
+):
+    due_at = b.due_at
+    if due_at.tzinfo is not None:
+        due_at = due_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+    if due_at <= now():
+        raise HTTPException(400, "زمان یادآوری جدید باید در آینده باشد.")
+    with Session() as s:
+        reminder = s.get(RemovalReminder, reminder_id)
+        if not reminder or reminder.status == "cancelled":
+            raise HTTPException(404, "یادآوری فعالی پیدا نشد.")
+        reminder.due_at = due_at
+        reminder.status = "scheduled"
+        reminder.updated_at = now()
+        log(s, "removal_reminder", f"زمان یادآوری {reminder_id} تغییر کرد")
+        s.commit()
+        return _reminder_record(s, reminder)
+
+
+@app.post("/api/removal-reminders/{reminder_id}/cancel")
+def cancel_removal_reminder(reminder_id: int):
+    with Session() as s:
+        reminder = s.get(RemovalReminder, reminder_id)
+        if not reminder or reminder.status == "cancelled":
+            raise HTTPException(404, "یادآوری فعالی پیدا نشد.")
+        reminder.status = "cancelled"
+        reminder.updated_at = now()
+        log(s, "removal_reminder", f"یادآوری {reminder_id} لغو شد")
+        s.commit()
+        return _reminder_record(s, reminder)
+
+
+def _feedback_record(feedback: Feedback) -> dict:
+    return {
+        "ticket": feedback.ticket,
+        "category": feedback.category,
+        "message": feedback.message,
+        "status": feedback.status,
+        "reply": feedback.reply,
+        "created_at": feedback.created_at,
+        "updated_at": feedback.updated_at,
+    }
+
+
+@app.post("/api/feedback")
+def submit_feedback(b: FeedbackIn):
+    ticket = f"FB-{uuid.uuid4().hex[:16].upper()}"
+    with Session() as s:
+        feedback = Feedback(
+            ticket=ticket,
+            category=b.category,
+            message=b.message.strip(),
+        )
+        s.add(feedback)
+        log(s, "feedback", f"بازخورد ناشناس با شماره پیگیری {ticket} ثبت شد")
+        s.commit()
+        return {"ticket": feedback.ticket, "status": feedback.status}
+
+
+@app.get("/api/feedback")
+def get_feedback(ticket: str):
+    with Session() as s:
+        feedback = s.scalar(
+            select(Feedback).where(Feedback.ticket == ticket.strip().upper())
+        )
+        if not feedback:
+            raise HTTPException(404, "شماره پیگیری پیدا نشد.")
+        return {
+            "ticket": feedback.ticket,
+            "status": feedback.status,
+            "reply": feedback.reply,
+            "updated_at": feedback.updated_at,
+        }
+
+
+@app.get("/api/feedback/admin")
+def list_feedback(request: Request):
+    if not auth.can(request.state.user.role, "edit"):
+        raise HTTPException(403, "دسترسی لازم برای مدیریت بازخورد را ندارید.")
+    with Session() as s:
+        return [
+            _feedback_record(item)
+            for item in s.scalars(
+                select(Feedback).order_by(Feedback.id.desc()).limit(500)
+            )
+        ]
+
+
+@app.patch("/api/feedback/admin/{ticket}")
+def update_feedback(ticket: str, b: FeedbackUpdateIn, request: Request):
+    if not auth.can(request.state.user.role, "edit"):
+        raise HTTPException(403, "دسترسی لازم برای مدیریت بازخورد را ندارید.")
+    with Session() as s:
+        feedback = s.scalar(
+            select(Feedback).where(Feedback.ticket == ticket.upper())
+        )
+        if not feedback:
+            raise HTTPException(404, "شماره پیگیری پیدا نشد.")
+        feedback.status = b.status
+        feedback.reply = b.reply.strip()
+        feedback.updated_at = now()
+        log(s, "feedback", f"وضعیت بازخورد {feedback.ticket} به‌روز شد")
+        s.commit()
+        return _feedback_record(feedback)
 
 
 @app.get("/api/activity")
@@ -704,6 +1039,22 @@ async def run_ai(b: AIIn):
         raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
     if not (b.text.strip() or b.prompt.strip()):
         raise HTTPException(400, "ابتدا متنی بنویسید.")
+    language = {"fa": "فارسی", "en": "انگلیسی", "ar": "عربی"}[b.language]
+    tone = {
+        "neutral": "متعادل",
+        "formal": "رسمی",
+        "friendly": "دوستانه",
+        "news": "خبری",
+    }[b.tone]
+    length = {
+        "short": "کوتاه",
+        "medium": "متوسط",
+        "long": "مفصل",
+    }[b.length]
+    instruction = (
+        f"{instruction}\n\nزبان خروجی: {language}. "
+        f"لحن: {tone}. طول: {length}."
+    )
     try:
         out = await ai.get_provider().complete(
             ai.SYSTEM, f"{instruction}\n\n{b.text}"
@@ -1151,10 +1502,16 @@ def health():
 
 # =============================================================== security
 
-PUBLIC = ("/api/health", "/api/auth/state", "/api/auth/register", "/api/auth/login")
+PUBLIC = (
+    "/api/health", "/api/auth/state", "/api/auth/register",
+    "/api/auth/login", "/api/feedback",
+)
 
 RULES = [
     (("GET", "POST", "DELETE"), r"^/api/team", "owner"),
+    (("GET", "PATCH"), r"^/api/feedback/admin", "edit"),
+    (("GET", "POST"), r"^/api/removal-reminders", "edit"),
+    (("POST",), r"^/api/removal-reminders/\d+/(cancel|reschedule)", "edit"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
     (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
