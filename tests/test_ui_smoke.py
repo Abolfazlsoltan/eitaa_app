@@ -157,13 +157,26 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
-    def test_ai_provider_dropdown_registers_supported_selection_callback(self):
+    def test_ai_settings_screen_hides_legacy_provider_and_key_controls(self):
         async def run():
             await self.app.api.bootstrap()
-            view = await self.app.v_ai_settings()
-            dropdowns = self._find_controls(view, ft.Dropdown)
-            self.assertEqual(len(dropdowns), 1)
-            self.assertTrue(callable(dropdowns[0].on_select))
+            visible = await self.app.v_ai_settings()
+            self.assertIsInstance(visible, ft.Container)
+            self.assertEqual(
+                self._find_controls(visible, ft.Dropdown), []
+            )
+            self.assertEqual(
+                self._find_controls(visible, ft.TextField), []
+            )
+            labels = [
+                control.value
+                for control in self._find_controls(visible, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertFalse(any(
+                "API key" in label or "ارائه‌دهنده" in label
+                for label in labels
+            ))
 
         self.loop.run_until_complete(run())
 
