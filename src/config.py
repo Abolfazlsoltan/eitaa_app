@@ -38,7 +38,7 @@ GROQ_API_KEY = os.getenv(
     "GROQ_API_KEY",
     "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",
 )
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # ------------------------------------------------------------------- layout
 # Number of items kept in the local activity feed.

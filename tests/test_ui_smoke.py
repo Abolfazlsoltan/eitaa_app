@@ -4,12 +4,12 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import flet as ft
-from main import App
+from main import ApiError, App
 
 
 class MemoryStorage:
@@ -57,7 +57,7 @@ class UISmokeTests(unittest.TestCase):
             for view in (
                 "home",
                 "posts",
-                "templates",
+                "chat",
                 "settings",
                 "ai_settings",
                 "help",
@@ -78,6 +78,68 @@ class UISmokeTests(unittest.TestCase):
                         else:
                             await self.app.go(view)
                     self.assertIsInstance(self.app.body.content, ft.Container)
+
+        self.loop.run_until_complete(run())
+
+    def test_navigation_replaces_templates_with_ai_chat(self):
+        from main import NAV_VIEWS
+
+        self.assertEqual(NAV_VIEWS, ["home", "posts", "chat", "settings"])
+        self.assertFalse(hasattr(self.app, "v_templates"))
+        self.assertEqual(
+            self.app._fab_for("home").icon,
+            ft.Icons.AUTO_AWESOME,
+        )
+
+    def test_chat_view_builds_with_composer_and_ai_action_selector(self):
+        async def run():
+            await self.app.api.bootstrap()
+            view = await self.app.v_chat()
+            self.assertIsInstance(view, ft.Container)
+            self.assertEqual(
+                len(self._find_controls(view, ft.TextField)), 1
+            )
+            dropdowns = self._find_controls(view, ft.Dropdown)
+            self.assertEqual(len(dropdowns), 1)
+            self.assertEqual(dropdowns[0].value, "create")
+
+        self.loop.run_until_complete(run())
+
+    def test_chat_request_failure_preserves_input_and_retry_succeeds(self):
+        async def run():
+            await self.app.api.bootstrap()
+            self.app.spawn = lambda coro: asyncio.create_task(coro)
+            self.app.api.ai = AsyncMock(
+                side_effect=[
+                    ApiError("مدل اول در دسترس نبود."),
+                    "پیشنهاد آماده",
+                ]
+            )
+            view = await self.app.v_chat()
+            prompt = self._find_controls(view, ft.TextField)[0]
+            send = next(
+                control for control in self._find_controls(
+                    view, ft.IconButton
+                )
+                if control.icon == ft.Icons.ARROW_UPWARD_ROUNDED
+            )
+            prompt.value = "یک پست معرفی محصول بساز"
+            await send.on_click(None)
+            self.assertEqual(prompt.value, "یک پست معرفی محصول بساز")
+            self.assertEqual(self.app.chat_messages[0]["status"], "failed")
+
+            retry = next(
+                control for control in self._find_controls(
+                    view, ft.TextButton
+                )
+                if control.content == "تلاش دوباره"
+            )
+            await retry.on_click(None)
+            self.assertEqual(prompt.value, "")
+            self.assertEqual(self.app.chat_messages[1]["text"], "پیشنهاد آماده")
+            self.assertEqual(self.app.chat_messages[1]["status"], "ready")
+            self.assertEqual(self.app.api.ai.await_count, 2)
+            await asyncio.sleep(0)
 
         self.loop.run_until_complete(run())
 
