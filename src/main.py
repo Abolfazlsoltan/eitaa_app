@@ -775,6 +775,8 @@ class App:
     # =============================================================== views =
     async def v_home(self):
         stats = await self._safe_get("/stats", {})
+        if isinstance(stats, dict):
+            stats["ai_calls"] = len(await self.api._load("ai_usage", []))
         posts = await self._safe_get("/posts", [])
         self.channels = await self._safe_get("/channels", self.channels)
         names = {c["id"]: c["title"] for c in self.channels}
@@ -2491,9 +2493,10 @@ class App:
                                        lambda e: self.spawn(self._channels_sheet())),
                         ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.AUTO_AWESOME_OUTLINED,
-                                       "هوش مصنوعی",
-                                       "انتخاب سرویس، مدل و کلید",
-                                       lambda e: self.spawn(self.go("ai"))),
+                                       "دستیار هوشمند",
+                                       "ساخت و ویرایش محتوای پست",
+                                       lambda e: self.spawn(
+                                           self.go("ai_settings"))),
                         ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.HELP_OUTLINE,
                                        "راهنمای اتصال",
@@ -2586,7 +2589,7 @@ class App:
             opacity=0.5 if disabled else 1,
         )
 
-    async def v_ai_settings(self):
+    async def _legacy_ai_settings(self):
         if self.api.online:
             async def test_server_ai():
                 try:
@@ -2773,6 +2776,61 @@ class App:
             "anthropic": "https://console.anthropic.com/settings/keys",
         }
         self.page.launch_url(urls.get(provider, urls["groq"]))
+
+    async def v_ai_settings(self):
+        def open_assistant(_event):
+            self.spawn(self.go("chat"))
+
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header(
+                    "دستیار هوشمند",
+                    subtitle="ساخت و بهبود محتوای کانال",
+                ),
+                ft.Container(
+                    content=surface_card(ft.Column([
+                        ft.Container(
+                            content=ft.Icon(
+                                ft.Icons.AUTO_AWESOME,
+                                size=30,
+                                color="#FFFFFF",
+                            ),
+                            width=64,
+                            height=64,
+                            border_radius=22,
+                            alignment=ft.Alignment(0, 0),
+                            gradient=ft.LinearGradient(
+                                colors=["#7C4DFF", "#00B8D9"]
+                            ),
+                        ),
+                        T("همراه نوشتن محتوای شما", size=17,
+                          weight=ft.FontWeight.BOLD),
+                        T(
+                            "ایده‌پردازی، بازنویسی، اصلاح نگارش، ترجمه و "
+                            "ساخت عنوان را در گفت‌وگو انجام دهید. پاسخ‌ها "
+                            "پیش از انتشار قابل ویرایش و ذخیره به‌عنوان "
+                            "پیش‌نویس هستند.",
+                            size=13,
+                            color=Palette.MUTED_LIGHT,
+                        ),
+                        T(
+                            "برای پاسخ‌گویی به اینترنت نیاز است. متن "
+                            "درخواست شما برای پردازش به سرویس هوش مصنوعی "
+                            "ارسال می‌شود؛ اطلاعات حساس را وارد نکنید.",
+                            size=11,
+                            color=Palette.MUTED_LIGHT,
+                        ),
+                        btn_primary(
+                            "رفتن به دستیار",
+                            open_assistant,
+                            expand=True,
+                        ),
+                    ], spacing=14)),
+                    padding=16,
+                ),
+            ], scroll=ft.ScrollMode.AUTO),
+            expand=True,
+        )
 
     async def v_help(self):
         return ft.Container(

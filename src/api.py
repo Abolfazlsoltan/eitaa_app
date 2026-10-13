@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ai import AIServiceError, AnonymousAI
 import config
 
 
@@ -144,6 +145,7 @@ class Api:
         self.on_unauthorized = lambda: None
 
         self._client: httpx.AsyncClient | None = None
+        self._ai_client = AnonymousAI()
         self._ready = False
 
     # ---------------------------------------------------------- lifecycle --
@@ -222,8 +224,7 @@ class Api:
         self, action: str, text: str, prompt: str = "",
         language: str = "fa", tone: str = "neutral", length: str = "medium",
     ) -> str:
-        result = await self._dispatch(
-            "POST", "/ai",
+        result = await self._anonymous_ai(
             {
                 "action": action,
                 "text": text,
@@ -231,10 +232,9 @@ class Api:
                 "language": language,
                 "tone": tone,
                 "length": length,
-            },
-            timeout=_TIMEOUT_AI,
+            }
         )
-        return str((result or {}).get("text", ""))
+        return str(result["text"])
 
     async def ai_settings(self) -> dict:
         provider = await self.storage.get("ai_provider") or "groq"
@@ -940,6 +940,55 @@ class Api:
         }
 
     # ------------------------------------------------------------ AI -------
+    async def _anonymous_ai(self, body: dict) -> dict:
+        action = body.get("action") or ""
+        text = body.get("text") or ""
+        prompt = body.get("prompt") or ""
+        if not isinstance(text, str) or not isinstance(prompt, str):
+            raise ApiError("درخواست متن معتبر نیست.")
+
+        instruction = prompt.strip() or _AI_ACTIONS.get(action)
+        if not instruction:
+            raise ApiError("عملیات نامعتبر است.")
+        if not (text.strip() or prompt.strip()):
+            raise ApiError("لطفاً ابتدا متنی بنویسید.")
+
+        language = body.get("language", "fa")
+        tone = body.get("tone", "neutral")
+        length = body.get("length", "medium")
+        if language not in ("fa", "en", "ar"):
+            raise ApiError("زبان خروجی انتخاب‌شده معتبر نیست.")
+        if tone not in ("neutral", "formal", "friendly", "news"):
+            raise ApiError("لحن انتخاب‌شده معتبر نیست.")
+        if length not in ("short", "medium", "long"):
+            raise ApiError("اندازه خروجی انتخاب‌شده معتبر نیست.")
+
+        guidance = {"fa": "فارسی", "en": "انگلیسی", "ar": "عربی"}[language]
+        tone_guidance = {
+            "neutral": "متعادل",
+            "formal": "رسمی",
+            "friendly": "دوستانه",
+            "news": "خبری",
+        }[tone]
+        length_guidance = {
+            "short": "کوتاه",
+            "medium": "متوسط",
+            "long": "مفصل",
+        }[length]
+        preferences = (
+            f"زبان خروجی: {guidance}. لحن: {tone_guidance}. "
+            f"طول: {length_guidance}."
+        )
+        user_msg = (
+            f"{instruction}\n\n{preferences}"
+            + (f"\n\n{text}" if text else "")
+        )
+        try:
+            output = await self._ai_client.complete(_SYSTEM, user_msg)
+        except AIServiceError as exc:
+            raise ApiError(str(exc), network=True) from exc
+        return await self._record_ai_usage(action, text, output)
+
     async def _ai(self, body: dict) -> dict:
         provider = await self.storage.get("ai_provider") or "groq"
         if provider not in _AI_PROVIDERS:
