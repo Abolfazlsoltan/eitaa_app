@@ -95,7 +95,7 @@ ACCENTS = {
 }
 
 # Tabs shown in the bottom navigation bar, in order.
-NAV_VIEWS = ["home", "posts", "templates", "settings"]
+NAV_VIEWS = ["home", "posts", "chat", "settings"]
 
 
 # ==================================================================== helpers
@@ -188,6 +188,7 @@ class App:
         self.view = "home"
         self.theme_mode = "light"
         self.accent_name = "آبی"
+        self.chat_messages: list[dict] = []
 
         self.body = ft.Container(expand=True)
         self.api = Api(Storage(prefs))
@@ -511,9 +512,11 @@ class App:
                 ft.NavigationBarDestination(icon=ft.Icons.ARTICLE_OUTLINED,
                                             selected_icon=ft.Icons.ARTICLE,
                                             label="پست‌ها"),
-                ft.NavigationBarDestination(icon=ft.Icons.FOLDER_OUTLINED,
-                                            selected_icon=ft.Icons.FOLDER,
-                                            label="قالب‌ها"),
+                ft.NavigationBarDestination(
+                    icon=ft.Icons.AUTO_AWESOME_OUTLINED,
+                    selected_icon=ft.Icons.AUTO_AWESOME,
+                    label="دستیار AI",
+                ),
                 ft.NavigationBarDestination(icon=ft.Icons.SETTINGS_OUTLINED,
                                             selected_icon=ft.Icons.SETTINGS,
                                             label="تنظیمات"),
@@ -559,7 +562,16 @@ class App:
     def _fab_for(self, view):
         if view in ("home", "posts"):
             return ft.FloatingActionButton(
+                icon=ft.Icons.AUTO_AWESOME,
+                tooltip="گفت‌وگو با دستیار هوشمند",
+                bgcolor="#6D4AFF",
+                foreground_color="#FFFFFF",
+                on_click=lambda e: self.spawn(self.go("chat")),
+            )
+        if view == "chat":
+            return ft.FloatingActionButton(
                 icon=ft.Icons.ADD,
+                tooltip="ساخت پیش‌نویس",
                 bgcolor=Palette.PRIMARY,
                 foreground_color="#FFFFFF",
                 on_click=lambda e: self.spawn(self.go("new")),
@@ -784,68 +796,23 @@ class App:
                                     ft.Icons.CAMPAIGN, Palette.PRIMARY),
                     self._stat_tile("منتشرشده", stats.get("published", 0),
                                     ft.Icons.CHECK_CIRCLE, Palette.SUCCESS),
-                ], spacing=12),
-                padding=ft.Padding.symmetric(horizontal=16),
-            ),
-            ft.Container(height=12),
-            ft.Container(
-                content=ft.Row([
-                    self._stat_tile("خطا", stats.get("failed", 0),
-                                    ft.Icons.ERROR_OUTLINE, Palette.DANGER),
-                    self._stat_tile("هوش مصنوعی", stats.get("ai_calls", 0),
-                                    ft.Icons.AUTO_AWESOME, Palette.PRIMARY),
                     self._stat_tile("پیش‌نویس", stats.get("drafts", 0),
                                     ft.Icons.EDIT_NOTE, Palette.PRIMARY),
                 ], spacing=12),
                 padding=ft.Padding.symmetric(horizontal=16),
             ),
-            ft.Container(height=12),
             ft.Container(
                 content=ft.Row([
                     self._stat_tile("زمان‌بندی", stats.get("scheduled", 0),
                                     ft.Icons.SCHEDULE, Palette.WARNING),
-                    self._stat_tile("در صف", stats.get("queued", 0),
-                                    ft.Icons.SCHEDULE, Palette.WARNING),
-                    self._stat_tile(
-                        "یادآوری بررسی",
-                        stats.get("removal_reminders", 0),
-                        ft.Icons.NOTIFICATIONS_OUTLINED,
-                        Palette.PRIMARY,
-                    ),
+                    self._stat_tile("ناموفق", stats.get("failed", 0),
+                                    ft.Icons.ERROR_OUTLINE, Palette.DANGER),
+                    self._stat_tile("درخواست AI", stats.get("ai_calls", 0),
+                                    ft.Icons.AUTO_AWESOME, "#6D4AFF"),
                 ], spacing=12),
                 padding=ft.Padding.symmetric(horizontal=16),
             ),
-            ft.Container(height=24),
-
-            # ---- quick action ----
-            ft.Container(
-                content=ft.Container(
-                    content=ft.Row([
-                        ft.Column([
-                            T("ایده داری؟", size=16, weight=ft.FontWeight.BOLD,
-                              color="#FFFFFF"),
-                            T("با هوش مصنوعی پست بساز", size=12,
-                              color="#FFFFFFC0"),
-                        ], spacing=2, expand=True),
-                        ft.Container(
-                            content=ft.Icon(ft.Icons.ARROW_BACK, color="#FFFFFF",
-                                            size=22),
-                            padding=12, border_radius=12,
-                            bgcolor="#FFFFFF30",
-                        ),
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=20,
-                    border_radius=20,
-                    gradient=ft.LinearGradient(
-                        begin=ft.Alignment.TOP_LEFT,
-                        end=ft.Alignment.BOTTOM_RIGHT,
-                        colors=[Palette.ACCENT, Palette.PRIMARY],
-                    ),
-                ),
-                padding=ft.Padding.symmetric(horizontal=16),
-                on_click=lambda e: self.spawn(self.go("new")),
-            ),
-            ft.Container(height=12),
+            ft.Container(height=20),
             self._parse_web_card(),
             ft.Container(height=28),
         ]
@@ -1579,6 +1546,287 @@ class App:
             expand=True,
         )
 
+    # ------------------------------------------------------------ AI chat --
+    async def v_chat(self):
+        stored = await self.api.storage.get("ai_chat_history")
+        self.chat_messages = [
+            item for item in stored if isinstance(item, dict)
+            and item.get("role") in ("user", "assistant")
+            and isinstance(item.get("text"), str)
+        ][-30:] if isinstance(stored, list) else []
+        for item in self.chat_messages:
+            if item.get("status") == "waiting":
+                item["status"] = "failed"
+        state = {"busy": False}
+        transcript = ft.Column(
+            spacing=12,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
+        prompt = ft.TextField(
+            hint_text="ایده یا درخواستت را بنویس…",
+            multiline=True,
+            min_lines=1,
+            max_lines=4,
+            shift_enter=True,
+            border_radius=22,
+            filled=True,
+            bgcolor=Palette.CARD_LIGHT,
+            expand=True,
+        )
+        action = ft.Dropdown(
+            value="create",
+            options=[
+                ft.dropdown.Option("create", "ساخت محتوا"),
+                ft.dropdown.Option("rewrite", "بازنویسی"),
+                ft.dropdown.Option("proofread", "ویرایش نگارشی"),
+                ft.dropdown.Option("summarize", "خلاصه‌سازی"),
+                ft.dropdown.Option("translate", "ترجمه"),
+                ft.dropdown.Option("titles", "عنوان"),
+                ft.dropdown.Option("hashtags", "هشتگ"),
+                ft.dropdown.Option("variants", "چند نسخه"),
+            ],
+            border_radius=14,
+            text_size=12,
+            width=140,
+            dense=True,
+        )
+
+        async def persist_history():
+            self.chat_messages = self.chat_messages[-30:]
+            await self.api.storage.set("ai_chat_history", self.chat_messages)
+
+        def render_transcript():
+            transcript.controls.clear()
+            if not self.chat_messages:
+                transcript.controls.append(ft.Container(
+                    content=ft.Column([
+                        ft.Container(
+                            content=ft.Icon(
+                                ft.Icons.AUTO_AWESOME,
+                                size=34,
+                                color="#FFFFFF",
+                            ),
+                            width=68, height=68, border_radius=24,
+                            alignment=ft.Alignment(0, 0),
+                            gradient=ft.LinearGradient(
+                                colors=["#7C4DFF", "#00B8D9"]
+                            ),
+                        ),
+                        T("دستیار محتوای ایتا", size=19,
+                          weight=ft.FontWeight.BOLD),
+                        T("ایده‌ات را بگو؛ پیش‌نویس را با هم بسازیم.",
+                          size=13, color=Palette.MUTED_LIGHT,
+                          text_align=ft.TextAlign.CENTER),
+                        T("خروجی فقط پیشنهاد است و خودکار منتشر نمی‌شود.",
+                          size=11, color=Palette.MUTED_LIGHT,
+                          text_align=ft.TextAlign.CENTER),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                       spacing=12),
+                    padding=ft.Padding.symmetric(vertical=36, horizontal=20),
+                    alignment=ft.Alignment(0, 0),
+                ))
+            for index, message in enumerate(self.chat_messages):
+                is_user = message["role"] == "user"
+                failed = message.get("status") == "failed"
+                waiting = message.get("status") == "waiting"
+                bubble = ft.Container(
+                    content=ft.Column([
+                        T(
+                            message["text"],
+                            size=14,
+                            color="#FFFFFF" if is_user else Palette.TEXT_LIGHT,
+                            selectable=True,
+                        ),
+                        *(
+                            [ft.Row([
+                                ft.ProgressRing(
+                                    width=12, height=12, stroke_width=2,
+                                    color="#FFFFFF",
+                                ),
+                                T("در حال دریافت پاسخ…", size=11,
+                                  color="#FFFFFF"),
+                            ], spacing=8)]
+                            if waiting else []
+                        ),
+                        *(
+                            [ft.Row([
+                                T("پاسخ آماده نشد؛ متن شما حفظ شده است.",
+                                  size=11, color="#FFE1E1"),
+                                ft.TextButton(
+                                    "تلاش دوباره",
+                                    icon=ft.Icons.REFRESH,
+                                    on_click=lambda e, i=index:
+                                        self.spawn(send_message(
+                                            self.chat_messages[i]["text"],
+                                            retry_index=i,
+                                        )),
+                                ),
+                            ], wrap=True)]
+                            if failed else []
+                        ),
+                        *(
+                            [ft.TextButton(
+                                "ذخیره به‌عنوان پیش‌نویس",
+                                icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
+                                on_click=lambda e, text=message["text"]:
+                                    self.spawn(save_draft(text)),
+                            )]
+                            if not is_user and message.get("status") == "ready"
+                            else []
+                        ),
+                    ], spacing=6, tight=True),
+                    padding=14,
+                    border_radius=ft.BorderRadius(
+                        18, 18, 5 if is_user else 18, 18
+                    ),
+                    bgcolor=(
+                        "#B42335" if failed else
+                        "#6246D9" if is_user else Palette.CARD_LIGHT
+                    ),
+                    shadow=ft.BoxShadow(
+                        blur_radius=14,
+                        color="#0F172A10",
+                        offset=ft.Offset(0, 3),
+                    ),
+                    width=280,
+                )
+                transcript.controls.append(ft.Row(
+                    [bubble],
+                    alignment=(
+                        ft.MainAxisAlignment.END if is_user
+                        else ft.MainAxisAlignment.START
+                    ),
+                ))
+            self.page.update()
+
+        async def save_draft(text: str):
+            try:
+                created = await self.api.post("/posts", {
+                    "title": "پیشنهاد دستیار هوشمند",
+                    "text": text,
+                    "mode": "draft",
+                })
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+                return
+            if not isinstance(created, dict) or not isinstance(
+                created.get("id"), int
+            ):
+                self.toast("ذخیره پیش‌نویس تأیید نشد؛ دوباره تلاش کنید.",
+                           error=True)
+                return
+            self.toast("پیشنهاد به پیش‌نویس‌ها افزوده شد.")
+
+        async def send_message(text: str, retry_index: int | None = None):
+            if state["busy"] or not text.strip():
+                return
+            state["busy"] = True
+            selected_action = action.value or "create"
+            if retry_index is None:
+                self.chat_messages.append({
+                    "role": "user",
+                    "text": text.strip(),
+                    "status": "waiting",
+                    "action": selected_action,
+                })
+                user_index = len(self.chat_messages) - 1
+            else:
+                user_index = retry_index
+                self.chat_messages[user_index]["status"] = "waiting"
+                selected_action = self.chat_messages[user_index].get(
+                    "action", selected_action
+                )
+            await persist_history()
+            render_transcript()
+            prompt.value = ""
+            send_button.disabled = True
+            self.page.update()
+            try:
+                recent_context = self.chat_messages[
+                    max(0, user_index - 7):user_index
+                ]
+                contextual_text = "\n".join(
+                    f"{'کاربر' if item['role'] == 'user' else 'دستیار'}: "
+                    f"{item['text'][:1500]}"
+                    for item in recent_context
+                    if item.get("status") == "ready"
+                )
+                request_text = (
+                    f"پیشینه گفت‌وگو:\n{contextual_text}\n\n"
+                    f"درخواست فعلی:\n{text.strip()}"
+                    if contextual_text else text.strip()
+                )
+                result = await self.api.ai(
+                    selected_action,
+                    request_text,
+                    language="fa",
+                    tone="neutral",
+                    length="medium",
+                )
+                self.chat_messages[user_index]["status"] = "ready"
+                self.chat_messages.append({
+                    "role": "assistant", "text": result, "status": "ready",
+                })
+            except ApiError as exc:
+                self.chat_messages[user_index]["status"] = "failed"
+                prompt.value = text
+                self.toast(str(exc), error=True)
+            except Exception:
+                logger.exception("AI chat request failed unexpectedly")
+                self.chat_messages[user_index]["status"] = "failed"
+                prompt.value = text
+                self.toast(
+                    "پاسخ دریافت نشد؛ متن شما حفظ شد. دوباره تلاش کنید.",
+                    error=True,
+                )
+            finally:
+                state["busy"] = False
+                send_button.disabled = False
+                await persist_history()
+                render_transcript()
+                self.page.update()
+
+        send_button = ft.IconButton(
+            icon=ft.Icons.ARROW_UPWARD_ROUNDED,
+            icon_color="#FFFFFF",
+            bgcolor="#6246D9",
+            tooltip="ارسال درخواست",
+            on_click=lambda e: self.spawn(send_message(prompt.value or "")),
+        )
+        prompt.on_submit = lambda e: self.spawn(
+            send_message(prompt.value or "")
+        )
+        render_transcript()
+        return ft.Container(
+            content=ft.Column([
+                self.gradient_header(
+                    "دستیار هوشمند",
+                    subtitle="ساخت و ویرایش محتوا برای کانال",
+                    actions=[self._header_icon(ft.Icons.AUTO_AWESOME)],
+                ),
+                ft.Container(
+                    content=transcript,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Row([action], alignment=ft.MainAxisAlignment.END),
+                        ft.Row([prompt, send_button], spacing=8,
+                               vertical_alignment=ft.CrossAxisAlignment.END),
+                        T("پاسخ‌ها پیش از انتشار قابل ویرایش‌اند.",
+                          size=10, color=Palette.MUTED_LIGHT),
+                    ], spacing=6),
+                    padding=ft.Padding.only(
+                        left=14, right=14, top=10, bottom=14
+                    ),
+                    bgcolor=Palette.SURFACE_LIGHT,
+                ),
+            ], spacing=0),
+            expand=True,
+        )
+
     # -------------------------------------------------------- new post -----
     async def v_new(self, post_id: int | None = None):
         post = None
@@ -2190,47 +2438,6 @@ class App:
             expand=True,
         )
 
-    # --------------------------------------------------------- templates --
-    async def v_templates(self):
-        templates = await self._safe_get("/templates", [])
-
-        children = [
-            self.gradient_header(
-                "قالب‌ها",
-                subtitle="متن‌های آماده برای استفاده سریع",
-            ),
-            ft.Container(height=24),
-        ]
-        if templates:
-            children.extend(self._template_card(t) for t in templates)
-        else:
-            children.append(self._empty_state(
-                "قالبی وجود ندارد", None, ft.Icons.FOLDER_OUTLINED))
-        children.append(ft.Container(height=100))
-
-        return ft.Container(
-            content=ft.Column(children, scroll=ft.ScrollMode.AUTO, spacing=0),
-            expand=True,
-        )
-
-    def _template_card(self, template: dict):
-        return ft.Container(
-            content=ft.Container(
-                content=ft.Column([
-                    T(template["name"], size=15, weight=ft.FontWeight.BOLD,
-                      color=Palette.TEXT_LIGHT),
-                    T(template["body"], size=12, color=Palette.MUTED_LIGHT,
-                      max_lines=3, overflow=ft.TextOverflow.ELLIPSIS),
-                ], spacing=6, tight=True),
-                padding=16,
-                border_radius=18,
-                bgcolor=Palette.CARD_LIGHT,
-                shadow=ft.BoxShadow(blur_radius=14, color="#0F172A08",
-                                    offset=ft.Offset(0, 3)),
-            ),
-            padding=ft.Padding.symmetric(horizontal=16, vertical=6),
-        )
-
     # ---------------------------------------------------------- settings --
     async def v_settings(self):
         self.channels = await self._safe_get("/channels", self.channels)
@@ -2425,10 +2632,14 @@ class App:
             ],
             border_radius=14,
         )
-        model = tf("مدل", value=settings["model"],
-                   hint_text="نام مدل ارائه‌دهنده")
+        model = tf(
+            "مدل‌های چرخشی Groq" if provider.value == "groq" else "مدل",
+            value=settings["model"],
+            hint_text="برای این سرویس نام مدل را وارد کنید",
+            disabled=provider.value == "groq",
+        )
         model_defaults = {
-            "groq": config.GROQ_MODEL or "llama-3.3-70b-versatile",
+            "groq": "چرخش تصادفی بین ۳ مدل پشتیبانی‌شده",
             "openai": "gpt-4o-mini",
             "gemini": "gemini-2.5-flash",
             "anthropic": "claude-sonnet-4-6",
@@ -2463,6 +2674,11 @@ class App:
             model.value = model_values.get(
                 provider.value, model_defaults[provider.value]
             )
+            model.label = (
+                "مدل‌های چرخشی Groq"
+                if provider.value == "groq" else "مدل"
+            )
+            model.disabled = provider.value == "groq"
             base_url.disabled = provider.value != "openai"
             has_key = await self.api.ai_key_configured(provider.value)
             key_field.disabled = has_key
@@ -2516,6 +2732,15 @@ class App:
                         T("کلید در تنظیمات محلی دستگاه ذخیره می‌شود؛ "
                           "این ذخیره‌سازی گاوصندوق رمزگذاری‌شده نیست.",
                           size=12, color=Palette.MUTED_LIGHT),
+                        *(
+                            [T(
+                                "در هر درخواست یکی از سه مدل Groq به‌صورت "
+                                "تصادفی انتخاب می‌شود؛ در صورت خطا، مدل‌های "
+                                "دیگر نیز امتحان می‌شوند.",
+                                size=12, color=Palette.MUTED_LIGHT,
+                            )]
+                            if provider.value == "groq" else []
+                        ),
                         provider, model, base_url, key_field, key_status,
                         ft.Row([
                             btn_ghost("ذخیره",

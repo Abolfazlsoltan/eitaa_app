@@ -19,6 +19,7 @@ import csv
 import io
 import json
 import mimetypes
+import random
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -36,8 +37,13 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/comp
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _EITAA_BASE = "https://eitaayar.ir/api"
 _AI_PROVIDERS = ("groq", "openai", "gemini", "anthropic")
+_GROQ_MODELS = (
+    "llama-3.1-8b-instant",
+    "allam-2-7b",
+    "openai/gpt-oss-20b",
+)
 _AI_DEFAULT_MODELS = {
-    "groq": "llama-3.3-70b-versatile",
+    "groq": "llama-3.1-8b-instant",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.5-flash",
     "anthropic": "claude-sonnet-4-6",
@@ -237,12 +243,12 @@ class Api:
         model = await self.storage.get("ai_model")
         has_key = await self.ai_key_configured(provider)
         default_model = (
-            (config.GROQ_MODEL or _AI_DEFAULT_MODELS["groq"])
+            _AI_DEFAULT_MODELS["groq"]
             if provider == "groq" else _AI_DEFAULT_MODELS[provider]
         )
         return {
             "provider": provider,
-            "model": model or default_model,
+            "model": default_model if provider == "groq" else model or default_model,
             "has_key": has_key,
             "base_url": await self.storage.get("ai_base_url") or "",
         }
@@ -261,7 +267,7 @@ class Api:
     ) -> None:
         if provider not in _AI_PROVIDERS:
             raise ApiError("ارائه‌دهنده هوش مصنوعی پشتیبانی نمی‌شود.")
-        if not model.strip():
+        if provider != "groq" and not model.strip():
             raise ApiError("نام مدل را وارد کنید.")
         if provider == "openai":
             self._require_https_endpoint(base_url, allow_empty=True)
@@ -277,7 +283,8 @@ class Api:
                     "قابل جایگزینی نیست."
                 )
         await self._store_verified("ai_provider", provider)
-        await self._store_verified("ai_model", model.strip())
+        if provider != "groq":
+            await self._store_verified("ai_model", model.strip())
         if provider == "openai":
             await self._store_verified(
                 "ai_base_url", base_url.strip().rstrip("/")
@@ -990,7 +997,8 @@ class Api:
         endpoint = _GROQ_URL
         model = await self.storage.get("ai_model")
         if provider == "groq":
-            model = model or config.GROQ_MODEL
+            models = list(_GROQ_MODELS)
+            random.shuffle(models)
         else:
             if provider == "openai":
                 endpoint = await self.storage.get("ai_base_url") or _OPENAI_URL
@@ -1003,6 +1011,27 @@ class Api:
             out = await self._complete_anthropic(key, model, user_msg)
             return await self._record_ai_usage(action, text, out)
 
+        candidates = models if provider == "groq" else [model]
+        failures = []
+        for candidate in candidates:
+            try:
+                out = await self._complete_openai_compatible(
+                    endpoint, key, candidate, user_msg
+                )
+                return await self._record_ai_usage(action, text, out)
+            except ApiError as exc:
+                failures.append(exc)
+        if provider == "groq":
+            raise ApiError(
+                "هیچ‌یک از مدل‌های هوش مصنوعی در دسترس نبودند. "
+                "اتصال، کلید API و دسترسی حساب را بررسی کنید.",
+                network=all(error.network for error in failures),
+            ) from failures[-1]
+        raise failures[-1]
+
+    async def _complete_openai_compatible(
+        self, endpoint: str, key: str, model: str, user_msg: str
+    ) -> str:
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT_AI) as c:
                 r = await c.post(
@@ -1022,26 +1051,28 @@ class Api:
                     },
                 )
             data = r.json()
-        except (httpx.HTTPError, ValueError):
-            raise ApiError("ارتباط با سرویس هوش مصنوعی برقرار نشد.",
-                           network=True)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise ApiError(
+                "ارتباط با سرویس هوش مصنوعی برقرار نشد.",
+                network=True,
+            ) from exc
 
         if r.status_code != 200:
             if r.status_code in (401, 403):
                 raise ApiError("کلید API نامعتبر است یا دسترسی لازم را ندارد.")
             if r.status_code == 429:
                 raise ApiError("محدودیت درخواست سرویس AI؛ کمی بعد دوباره تلاش کنید.")
+            if r.status_code == 404:
+                raise ApiError("مدل انتخاب‌شده در سرویس پیدا نشد.")
             raise ApiError("سرویس هوش مصنوعی پاسخگو نیست.")
 
         try:
             content = data["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise ApiError("پاسخ خالی از سرویس هوش مصنوعی.")
-            out = content.strip()
-        except (KeyError, IndexError, TypeError, AttributeError):
-            raise ApiError("پاسخ نامعتبر از سرویس هوش مصنوعی.")
-
-        return await self._record_ai_usage(action, text, out)
+            return content.strip()
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise ApiError("پاسخ نامعتبر از سرویس هوش مصنوعی.") from exc
 
     async def _complete_anthropic(self, key: str, model: str, user_msg: str) -> str:
         try:

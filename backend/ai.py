@@ -14,6 +14,7 @@ Configuration (environment variables):
 from __future__ import annotations
 
 import os
+import random
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -45,12 +46,33 @@ class AIProvider(ABC):
 
 class GroqProvider(AIProvider):
     name = "groq"
-    default_model = "llama-3.3-70b-versatile"
+    default_model = "llama-3.1-8b-instant"
+    models = (
+        "llama-3.1-8b-instant",
+        "allam-2-7b",
+        "openai/gpt-oss-20b",
+    )
     endpoint = "https://api.groq.com/openai/v1/chat/completions"
 
     async def complete(self, system: str, user: str) -> str:
+        candidates = list(self.models)
+        random.shuffle(candidates)
+        failures = []
+        for model in candidates:
+            try:
+                return await self._complete_model(model, system, user)
+            except AIError as exc:
+                failures.append(exc)
+        raise AIError(
+            "هیچ‌یک از مدل‌های هوش مصنوعی در دسترس نبودند. "
+            "اتصال، کلید API و دسترسی حساب را بررسی کنید."
+        ) from failures[-1]
+
+    async def _complete_model(
+        self, model: str, system: str, user: str
+    ) -> str:
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -67,16 +89,29 @@ class GroqProvider(AIProvider):
             async with httpx.AsyncClient(timeout=90) as c:
                 r = await c.post(self.endpoint, headers=headers, json=payload)
             data = r.json()
-        except (httpx.HTTPError, ValueError):
-            raise AIError("ارتباط با سرویس هوش مصنوعی برقرار نشد.")
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise AIError(
+                "ارتباط با سرویس هوش مصنوعی برقرار نشد."
+            ) from exc
 
-        if r.status_code != 200:
+        if r.status_code != 200 or not isinstance(data, dict):
+            if r.status_code in (401, 403):
+                raise AIError("کلید API یا دسترسی سرویس هوش مصنوعی معتبر نیست.")
+            if r.status_code == 429:
+                raise AIError("محدودیت درخواست سرویس هوش مصنوعی.")
+            if r.status_code == 404:
+                raise AIError("مدل انتخاب‌شده در سرویس پیدا نشد.")
             raise AIError("سرویس هوش مصنوعی پاسخگو نیست.")
 
         try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError, AttributeError):
-            raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.")
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise AIError(
+                "پاسخ نامعتبر از سرویس هوش مصنوعی."
+            ) from exc
+        if not isinstance(content, str) or not content.strip():
+            raise AIError("پاسخ خالی از سرویس هوش مصنوعی.")
+        return content.strip()
 
 
 class AnthropicProvider(AIProvider):

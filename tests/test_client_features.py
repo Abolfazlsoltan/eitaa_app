@@ -388,6 +388,84 @@ class ClientFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_groq_random_fallback_uses_requested_models_and_records_success(self):
+        async def run():
+            self.storage.values.update({
+                "ai_provider": "groq",
+                "groq_key": "test-key",
+            })
+            responses = [
+                SimpleNamespace(status_code=404, json=lambda: {}),
+                SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {"choices": [{
+                        "message": {"content": "پاسخ مدل جایگزین"},
+                    }]},
+                ),
+            ]
+            client = MagicMock()
+            client.post = AsyncMock(side_effect=responses)
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=None)
+            with (
+                patch("api.random.shuffle", side_effect=lambda items: None),
+                patch("api.httpx.AsyncClient", return_value=client),
+            ):
+                result = await self.api._ai({
+                    "action": "create", "text": "یک ایده",
+                })
+
+            self.assertEqual(result["text"], "پاسخ مدل جایگزین")
+            models = [
+                call.kwargs["json"]["model"]
+                for call in client.post.await_args_list
+            ]
+            self.assertEqual(models, [
+                "llama-3.1-8b-instant",
+                "allam-2-7b",
+            ])
+            self.assertEqual(len(await self.api._load("ai_usage", [])), 1)
+
+        asyncio.run(run())
+
+    def test_groq_all_failures_do_not_record_successful_usage(self):
+        async def run():
+            self.storage.values.update({
+                "ai_provider": "groq",
+                "groq_key": "test-key",
+            })
+            client = MagicMock()
+            client.post = AsyncMock(side_effect=[
+                SimpleNamespace(status_code=404, json=lambda: {})
+                for _ in range(3)
+            ])
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=None)
+            with (
+                patch("api.random.shuffle", side_effect=lambda items: None),
+                patch("api.httpx.AsyncClient", return_value=client),
+            ):
+                with self.assertRaisesRegex(ApiError, "هیچ‌یک از مدل‌ها"):
+                    await self.api._ai({
+                        "action": "create", "text": "یک ایده",
+                    })
+
+            self.assertEqual(client.post.await_count, 3)
+            self.assertEqual(await self.api._load("ai_usage", []), [])
+
+        asyncio.run(run())
+
+    def test_groq_settings_hide_legacy_model_selection(self):
+        async def run():
+            self.storage.values.update({
+                "ai_provider": "groq",
+                "ai_model": "retired-model",
+            })
+            settings = await self.api.ai_settings()
+            self.assertEqual(settings["model"], "llama-3.1-8b-instant")
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()
