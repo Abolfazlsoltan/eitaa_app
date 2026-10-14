@@ -145,6 +145,10 @@ class User(Base):  # also serves as TeamMember (role: owner|editor|approver|publ
     pw_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(20), default="editor")
     eitaa_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Optional server-side profile extras. Empty by default; the client is
+    # free to keep its own copy on the device and never send it here.
+    avatar_b64: Mapped[str] = mapped_column(Text, default="")
+    avatar_mime: Mapped[str] = mapped_column(String(40), default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
 
 class Automation(Base):
@@ -186,6 +190,15 @@ MIGRATIONS = {
         "posts": [("updated_at", "DATETIME")],
     },
     3: {},
+    4: {
+        # Optional server-side profile extras for the owner / team members.
+        # Empty string defaults keep existing rows valid; the endpoints in
+        # ``backend.main`` write these columns only when an avatar is set.
+        "users": [
+            ("avatar_b64", "TEXT DEFAULT ''"),
+            ("avatar_mime", "VARCHAR(40) DEFAULT ''"),
+        ],
+    },
 }
 
 
