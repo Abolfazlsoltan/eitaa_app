@@ -9,10 +9,20 @@ Configuration (environment variables):
     AI_API_KEY   (required)  provider key
     AI_PROVIDER  (optional)  "groq" (default) or "anthropic"
     AI_MODEL     (optional)  model name; sensible default per provider
+
+Optional overrides (used mainly by tests and self-hosted mirrors):
+    AI_GROQ_ENDPOINT       override the Groq chat-completions URL
+    AI_ANTHROPIC_ENDPOINT  override the Anthropic messages URL
+
+Every user-visible error is a short Persian sentence produced by
+:class:`AIError`. Provider responses, HTTP status codes and the underlying
+exception are only written to the module logger, so nothing technical can
+leak into an HTTP response returned to the client.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 from abc import ABC, abstractmethod
@@ -21,8 +31,40 @@ from typing import Any
 import httpx
 
 
+logger = logging.getLogger(__name__)
+
+
 class AIError(Exception):
     """Raised when an AI provider call fails. The message is user-facing."""
+
+
+# ================================================================== helpers
+
+_TECHNICAL_MARKERS = (
+    "traceback", "file \"", "exception", "keyerror", "valueerror",
+    "typeerror", "attributeerror", "https://", "http://", "/api/",
+    "error:", "unauthorized", "forbidden",
+)
+
+
+def _clean_error(message: str, fallback: str) -> str:
+    """Return a short, user-safe Persian message.
+
+    Provider responses can be long, contain English error text or URL
+    fragments. This function replaces anything suspicious with ``fallback``
+    so callers never have to think about what reaches the client.
+    """
+    if not isinstance(message, str):
+        return fallback
+    clean = message.strip()
+    if not clean:
+        return fallback
+    if len(clean) > 220:
+        return fallback
+    lowered = clean.lower()
+    if any(marker in lowered for marker in _TECHNICAL_MARKERS):
+        return fallback
+    return clean
 
 
 # ================================================================ providers
@@ -47,26 +89,38 @@ class AIProvider(ABC):
 class GroqProvider(AIProvider):
     name = "groq"
     default_model = "llama-3.1-8b-instant"
+
+    # Order matters for tests and for deterministic fallback when
+    # ``random.shuffle`` is patched out.
     models = (
         "llama-3.1-8b-instant",
         "allam-2-7b",
         "openai/gpt-oss-20b",
     )
-    endpoint = "https://api.groq.com/openai/v1/chat/completions"
+
+    endpoint = (
+        os.getenv("AI_GROQ_ENDPOINT")
+        or "https://api.groq.com/openai/v1/chat/completions"
+    )
 
     async def complete(self, system: str, user: str) -> str:
         candidates = list(self.models)
         random.shuffle(candidates)
-        failures = []
+        failures: list[AIError] = []
         for model in candidates:
             try:
                 return await self._complete_model(model, system, user)
             except AIError as exc:
                 failures.append(exc)
+                logger.info(
+                    "Groq model %s failed: %s", model, exc,
+                )
+        # The test asserts that the final message contains
+        # "هیچ‌یک از مدل‌ها". Keep that substring intact.
         raise AIError(
-            "هیچ‌یک از مدل‌های هوش مصنوعی در دسترس نبودند. "
+            "هیچ‌یک از مدل‌ها در دسترس نبودند. "
             "اتصال، کلید API و دسترسی حساب را بررسی کنید."
-        ) from failures[-1]
+        ) from (failures[-1] if failures else None)
 
     async def _complete_model(
         self, model: str, system: str, user: str
@@ -90,13 +144,20 @@ class GroqProvider(AIProvider):
                 r = await c.post(self.endpoint, headers=headers, json=payload)
             data = r.json()
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            logger.info("Groq transport error: %s", type(exc).__name__)
             raise AIError(
                 "ارتباط با سرویس هوش مصنوعی برقرار نشد."
             ) from exc
 
         if r.status_code != 200 or not isinstance(data, dict):
+            logger.info(
+                "Groq returned status=%s for model=%s",
+                r.status_code, model,
+            )
             if r.status_code in (401, 403):
-                raise AIError("کلید API یا دسترسی سرویس هوش مصنوعی معتبر نیست.")
+                raise AIError(
+                    "کلید API یا دسترسی سرویس هوش مصنوعی معتبر نیست."
+                )
             if r.status_code == 429:
                 raise AIError("محدودیت درخواست سرویس هوش مصنوعی.")
             if r.status_code == 404:
@@ -106,10 +167,12 @@ class GroqProvider(AIProvider):
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            logger.info("Groq returned malformed payload for model=%s", model)
             raise AIError(
                 "پاسخ نامعتبر از سرویس هوش مصنوعی."
             ) from exc
         if not isinstance(content, str) or not content.strip():
+            logger.info("Groq returned empty content for model=%s", model)
             raise AIError("پاسخ خالی از سرویس هوش مصنوعی.")
         return content.strip()
 
@@ -117,7 +180,11 @@ class GroqProvider(AIProvider):
 class AnthropicProvider(AIProvider):
     name = "anthropic"
     default_model = "claude-sonnet-4-6"
-    endpoint = "https://api.anthropic.com/v1/messages"
+
+    endpoint = (
+        os.getenv("AI_ANTHROPIC_ENDPOINT")
+        or "https://api.anthropic.com/v1/messages"
+    )
     api_version = "2023-06-01"
 
     async def complete(self, system: str, user: str) -> str:
@@ -137,18 +204,31 @@ class AnthropicProvider(AIProvider):
             async with httpx.AsyncClient(timeout=90) as c:
                 r = await c.post(self.endpoint, headers=headers, json=payload)
             data = r.json()
-        except (httpx.HTTPError, ValueError):
-            raise AIError("ارتباط با سرویس هوش مصنوعی برقرار نشد.")
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("Anthropic transport error: %s", type(exc).__name__)
+            raise AIError("ارتباط با سرویس هوش مصنوعی برقرار نشد.") from exc
 
+        if r.status_code in (401, 403):
+            raise AIError(
+                "کلید API یا دسترسی سرویس هوش مصنوعی معتبر نیست."
+            )
+        if r.status_code == 429:
+            raise AIError("محدودیت درخواست سرویس هوش مصنوعی.")
         if r.status_code != 200:
+            logger.info("Anthropic returned status=%s", r.status_code)
             raise AIError("سرویس هوش مصنوعی پاسخگو نیست.")
 
         try:
-            return "".join(
-                block.get("text", "") for block in data.get("content", [])
+            result = "".join(
+                block.get("text", "")
+                for block in data.get("content", [])
+                if isinstance(block, dict)
             ).strip()
-        except AttributeError:
-            raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.")
+        except AttributeError as exc:
+            raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.") from exc
+        if not result:
+            raise AIError("پاسخ خالی از سرویس هوش مصنوعی.")
+        return result
 
 
 # ================================================================== registry
@@ -189,5 +269,5 @@ ACTIONS: dict[str, str] = {
     "translate": "متن زیر را ترجمه کن (فارسی به انگلیسی و غیرفارسی به فارسی):",
     "summarize": "متن زیر را خلاصه کن:",
     "proofread": "غلط‌های نگارشی و املایی متن زیر را اصلاح کن و معنا را تغییر نده:",
-                           "variants": "سه نسخه متفاوت و مستقل از متن زیر پیشنهاد بده و هر نسخه را شماره‌گذاری کن:",
-                       }
+    "variants": "سه نسخه متفاوت و مستقل از متن زیر پیشنهاد بده و هر نسخه را شماره‌گذاری کن:",
+}
