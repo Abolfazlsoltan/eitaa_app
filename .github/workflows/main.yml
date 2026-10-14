@@ -20,9 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
-    env:
-      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -39,152 +36,52 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git \
-            curl \
-            unzip \
-            xz-utils \
-            zip \
-            libglu1-mesa \
-            clang \
-            cmake \
-            ninja-build \
-            pkg-config \
-            libgtk-3-dev \
-            liblzma-dev
-
+      # Flet itself downloads the matching Flutter SDK and Android SDK on the
+      # first `flet build`, so they are not installed manually here.
+      # Keep this version the same as the one in your pyproject.toml / local env.
       - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "flet==1.0.4"
-
-      - name: Detect Flutter version
-        id: flutter
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FLUTTER_VERSION="$(python -c \
-            'import flet.version; print(flet.version.flutter_version)')"
-
-          if [ -z "$FLUTTER_VERSION" ]; then
-            echo "Could not detect the Flutter version required by Flet."
-            exit 1
-          fi
-
-          echo "version=$FLUTTER_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Flutter version: $FLUTTER_VERSION"
-
-      - name: Install Flutter
-        shell: bash
-        env:
-          FLUTTER_VERSION: ${{ steps.flutter.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          FLUTTER_DIR="$RUNNER_TEMP/flutter"
-
-          echo "Installing Flutter $FLUTTER_VERSION"
-
-          git clone \
-            --depth 1 \
-            --branch "$FLUTTER_VERSION" \
-            https://github.com/flutter/flutter.git \
-            "$FLUTTER_DIR"
-
-          echo "$FLUTTER_DIR/bin" >> "$GITHUB_PATH"
-          export PATH="$FLUTTER_DIR/bin:$PATH"
-
-          flutter --version
-          dart --version
-
-      - name: Configure Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;28.2.13676358" \
-            "cmake;3.22.1"
-
-      - name: Flutter doctor
-        run: flutter doctor -v
-
-      - name: Install Python dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          fi
-
-          if [ -f pyproject.toml ]; then
-            python -m pip install .
-          fi
-
-      - name: Prepare Android signing
-        if: ${{ env.ANDROID_KEYSTORE_B64 != '' }}
-        shell: bash
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          echo "$ANDROID_KEYSTORE_B64" \
-            | base64 --decode > "$RUNNER_TEMP/release-keystore.jks"
-
-          {
-            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release-keystore.jks"
-            echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
-            echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS"
-            echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
+          python -m pip install "flet[all]==1.0.4"
 
       - name: Build APK
         shell: bash
         env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
 
-          flet build apk \
-            --verbose \
-            --yes
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+
+            # These are the variable names Flet actually reads.
+            export FLET_ANDROID_SIGNING_KEY_STORE="$KEYSTORE_PATH"
+            export FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+            export FLET_ANDROID_SIGNING_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+            export FLET_ANDROID_SIGNING_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+          else
+            echo "::warning::No keystore secret found - the APK will be signed with the debug key."
+          fi
+
+          flet build apk --verbose --yes
 
       - name: Upload APK artifact
-        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: eitaa-channel-manager-apk
-          path: |
-            build/**/*.apk
-            **/build/**/*.apk
-          if-no-files-found: warn
+          path: build/apk/*.apk
+          if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build logs
+      - name: Upload build diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: apk-build-diagnostics
-          path: |
-            $RUNNER_TEMP/flutter/.pub-cache/log
-            ~/.gradle/daemon
-            ~/.gradle/caches
+          path: build/flutter/build/app/outputs/logs/
           if-no-files-found: ignore
           retention-days: 7
