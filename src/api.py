@@ -4,20 +4,26 @@ This module is the app's single point of contact with the outside world.
 It handles three concerns transparently:
 
     1. Data — posts, channels, templates, activity log.
-    2. AI — calls to Groq.
+    2. AI — keyless public text service (or configured provider on server).
     3. Publishing — calls to EitaaYar.
 
 When ``config.SERVER_URL`` is set, all requests go through the FastAPI
 backend at that address. When it is empty, everything happens on the
 device. The UI never needs to know which path is being used.
+
+User-facing errors are always short Persian sentences. Technical details
+(endpoints, status codes, exception types) are only written to the
+module logger so they never leak into dialogs, snackbars or screens.
 """
 
 from __future__ import annotations
 
-import datetime as dt
+import asyncio
 import csv
+import datetime as dt
 import io
 import json
+import logging
 import mimetypes
 import random
 import re
@@ -30,11 +36,17 @@ from ai import AIServiceError, AnonymousAI
 import config
 
 
+logger = logging.getLogger(__name__)
+
+
 # ================================================================== constants
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/openai/"
+    "chat/completions"
+)
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _EITAA_BASE = "https://eitaayar.ir/api"
 _AI_PROVIDERS = ("groq", "openai", "gemini", "anthropic")
@@ -53,16 +65,32 @@ _AI_DEFAULT_MODELS = {
 _TIMEOUT = 30.0
 _TIMEOUT_AI = 90.0
 _TIMEOUT_UPLOAD = 180.0
+_TIMEOUT_MIN = 10.0
 
 
 # ===================================================================== errors
 
 class ApiError(Exception):
-    """User-facing error. The message is always safe to display."""
+    """User-facing error. The message is always safe to display.
 
-    def __init__(self, message: str, network: bool = False):
+    Attributes:
+        network:   True when the failure was caused by connectivity.
+        retryable: True when a naive retry has a chance of succeeding.
+        status:    Optional HTTP status code for internal diagnostics.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        network: bool = False,
+        retryable: bool = False,
+        status: int | None = None,
+    ):
         super().__init__(message)
         self.network = network
+        self.retryable = retryable
+        self.status = status
 
 
 # ==================================================================== prompts
@@ -119,6 +147,22 @@ _CHANNEL_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?eitaa\.com/([A-Za-z0-9_]+)/?$"
 )
 
+_SAFE_ERRORS = {
+    400: "درخواست پذیرفته نشد؛ مقادیر ورودی را بررسی کنید.",
+    401: "ابتدا وارد شوید.",
+    403: "دسترسی لازم برای این عملیات را ندارید.",
+    404: "مورد درخواستی پیدا نشد.",
+    408: "پاسخی از سرور دریافت نشد؛ دوباره تلاش کنید.",
+    409: "این عملیات با وضعیت فعلی سرور سازگار نیست.",
+    413: "حجم فایل بیش از حد مجاز است.",
+    422: "اطلاعات وارد‌شده کامل یا معتبر نیست.",
+    429: "تعداد درخواست‌ها زیاد بود؛ کمی بعد دوباره تلاش کنید.",
+    500: "سرور موقتاً در دسترس نیست؛ کمی بعد دوباره تلاش کنید.",
+    502: "ارتباط با سرویس‌های پشت‌صحنه برقرار نشد.",
+    503: "سرویس در حال حاضر پاسخگو نیست؛ دوباره تلاش کنید.",
+    504: "سرور پاسخ نداد؛ دوباره تلاش کنید.",
+}
+
 
 def normalize_channel(raw: str) -> str:
     """Turn a link, @username or id into a bare channel identifier."""
@@ -131,6 +175,12 @@ def normalize_channel(raw: str) -> str:
 
 def _iso_now() -> str:
     return dt.datetime.utcnow().isoformat(timespec="seconds")
+
+
+def _mask_secret(text: str, secret: str) -> str:
+    if not secret:
+        return text
+    return text.replace(secret, "***")
 
 
 # ====================================================================== Api
@@ -220,6 +270,7 @@ class Api:
     def logout(self) -> None:
         self.token = None
 
+    # ------------------------------------------------------------- AI ------
     async def ai(
         self, action: str, text: str, prompt: str = "",
         language: str = "fa", tone: str = "neutral", length: str = "medium",
@@ -242,13 +293,11 @@ class Api:
             provider = "groq"
         model = await self.storage.get("ai_model")
         has_key = await self.ai_key_configured(provider)
-        default_model = (
-            _AI_DEFAULT_MODELS["groq"]
-            if provider == "groq" else _AI_DEFAULT_MODELS[provider]
-        )
+        default_model = _AI_DEFAULT_MODELS[provider]
         return {
             "provider": provider,
-            "model": default_model if provider == "groq" else model or default_model,
+            "model": default_model if provider == "groq"
+                     else model or default_model,
             "has_key": has_key,
             "base_url": await self.storage.get("ai_base_url") or "",
         }
@@ -273,15 +322,14 @@ class Api:
             self._require_https_endpoint(base_url, allow_empty=True)
         key_name = "groq_key" if provider == "groq" else f"ai_key_{provider}"
         new_key = key.strip()
-        if new_key:
-            existing_key = await self.storage.get(key_name)
-            if provider == "groq" and not existing_key:
-                existing_key = config.GROQ_API_KEY
-            if existing_key and existing_key != new_key:
-                raise ApiError(
-                    "کلید از قبل تنظیم شده و برای حفظ مقدار موجود از این صفحه "
-                    "قابل جایگزینی نیست."
-                )
+        existing_key = await self.storage.get(key_name)
+        if provider == "groq" and not existing_key:
+            existing_key = config.GROQ_API_KEY
+        if new_key and existing_key and existing_key != new_key:
+            raise ApiError(
+                "کلید از قبل تنظیم شده و برای حفظ مقدار موجود از این صفحه "
+                "قابل جایگزینی نیست."
+            )
         await self._store_verified("ai_provider", provider)
         if provider != "groq":
             await self._store_verified("ai_model", model.strip())
@@ -303,8 +351,11 @@ class Api:
     async def _store_verified(self, name: str, value: str) -> None:
         await self.storage.set(name, value)
         if await self.storage.get(name) != value:
-            raise ApiError("ذخیره تنظیمات ناموفق بود؛ فضای ذخیره‌سازی را بررسی کنید.")
+            raise ApiError(
+                "ذخیره تنظیمات ناموفق بود؛ فضای ذخیره‌سازی را بررسی کنید."
+            )
 
+    # ---------------------------------------------------------- uploads ----
     async def upload(self, name: str, data: bytes, tags: str = "") -> Any:
         if not self.online:
             raise ApiError("کتابخانه رسانه در حال حاضر در دسترس نیست.")
@@ -316,6 +367,7 @@ class Api:
             timeout=_TIMEOUT_UPLOAD,
         )
 
+    # ----------------------------------------------------- latest release --
     async def latest_release(self) -> dict:
         url = (
             "https://api.github.com/repos/"
@@ -333,24 +385,28 @@ class Api:
                     },
                 )
             data = response.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Latest-release fetch failed: %s", exc)
             raise ApiError(
                 "بررسی نسخه جدید انجام نشد؛ اتصال اینترنت را بررسی کنید.",
-                network=True,
+                network=True, retryable=True,
             )
         if response.status_code != 200 or not isinstance(data, dict):
-            raise ApiError("اطلاعات نسخه جدید از GitHub دریافت نشد.")
+            logger.warning(
+                "Latest-release returned status=%s", response.status_code
+            )
+            raise ApiError("اطلاعات نسخه جدید در دسترس نیست.")
         if data.get("draft") or data.get("prerelease"):
             raise ApiError("نسخه پایدار در دسترس نیست.")
         page_url = data.get("html_url")
-        if not self._is_github_release_url(page_url):
+        if not self._is_release_url(page_url):
             raise ApiError("پیوند انتشار دریافتی معتبر نیست.")
         apk_url = next((
             asset.get("browser_download_url")
             for asset in data.get("assets", [])
             if isinstance(asset, dict)
             and str(asset.get("name", "")).lower().endswith(".apk")
-            and self._is_github_release_url(asset.get("browser_download_url"))
+            and self._is_release_url(asset.get("browser_download_url"))
         ), "")
         return {
             "tag": str(data.get("tag_name") or ""),
@@ -361,12 +417,13 @@ class Api:
         }
 
     @staticmethod
-    def _is_github_release_url(url: Any) -> bool:
+    def _is_release_url(url: Any) -> bool:
         if not isinstance(url, str):
             return False
         parsed = urlparse(url)
         return parsed.scheme == "https" and parsed.hostname == "github.com"
 
+    # ---------------------------------------------------------- exports ----
     async def export_history(
         self, export_format: str, *, query: str = "", status: str = "all",
         channel_id: int | None = None,
@@ -425,31 +482,245 @@ class Api:
                 ])
         return f"eitaa-history-{stamp}.csv", stream.getvalue().encode("utf-8-sig")
 
+    # ------------------------------------------------------- local profile --
+    # Profile fields are stored only on the device. They never leave it.
+
+    async def get_profile(self) -> dict:
+        raw = await self.storage.get("data:local_profile")
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def has_profile(self) -> bool:
+        return bool(await self.get_profile())
+
+    async def save_profile(
+        self,
+        name: str = "",
+        username: str = "",
+        avatar_b64: str = "",
+        avatar_mime: str = "",
+    ) -> dict:
+        current = await self.get_profile()
+        profile = {
+            "name": (name or "").strip(),
+            "username": (username or "").strip(),
+            "avatar_b64": avatar_b64 or current.get("avatar_b64", ""),
+            "avatar_mime": avatar_mime or current.get("avatar_mime", ""),
+            "updated_at": _iso_now(),
+        }
+        await self._store_verified(
+            "data:local_profile",
+            json.dumps(profile, ensure_ascii=False),
+        )
+        return profile
+
+    async def clear_profile(self) -> None:
+        await self.storage.remove("data:local_profile")
+
+    # ------------------------------------------------- notifications ------
+    # The registry itself lives in ``config.NOTIFICATION_REGISTRY``.
+    # Here we only persist per-notification viewing state.
+
+    async def list_notifications(self) -> list[dict]:
+        registry = getattr(config, "NOTIFICATION_REGISTRY", None) or []
+        return [item for item in registry if isinstance(item, dict)]
+
+    async def notification_state(self) -> dict:
+        raw = await self.storage.get("data:notifications_state")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def _save_notification_state(self, state: dict) -> None:
+        await self.storage.set(
+            "data:notifications_state",
+            json.dumps(state, ensure_ascii=False),
+        )
+
+    async def record_notification_shown(self, notification_id: str) -> None:
+        if not notification_id:
+            return
+        state = await self.notification_state()
+        entry = state.get(notification_id) or {}
+        entry["shown"] = int(entry.get("shown", 0)) + 1
+        entry["last_shown"] = _iso_now()
+        state[notification_id] = entry
+        await self._save_notification_state(state)
+
+    async def dismiss_notification(self, notification_id: str) -> None:
+        if not notification_id:
+            return
+        state = await self.notification_state()
+        entry = state.get(notification_id) or {}
+        entry["dismissed"] = True
+        entry["dismissed_at"] = _iso_now()
+        state[notification_id] = entry
+        await self._save_notification_state(state)
+
+    async def snooze_notification(
+        self, notification_id: str, days: int = 3
+    ) -> None:
+        if not notification_id:
+            return
+        until = (
+            dt.datetime.utcnow() + dt.timedelta(days=max(1, int(days)))
+        ).isoformat(timespec="seconds")
+        state = await self.notification_state()
+        entry = state.get(notification_id) or {}
+        entry["snoozed_until"] = until
+        state[notification_id] = entry
+        await self._save_notification_state(state)
+
+    async def reset_notifications(self) -> None:
+        await self.storage.remove("data:notifications_state")
+
+    async def notification_decision(
+        self, notification: dict, now: dt.datetime | None = None
+    ) -> str:
+        """Return 'show', 'skip' or 'expired' for the given notification.
+
+        Decision rules (all are per-device):
+            * disabled / active == False         → skip
+            * expires_at in the past             → expired
+            * dismissed by the user              → skip
+            * snoozed_until in the future        → skip
+            * shown >= max_shows                 → skip
+            * cooldown_hours since last_shown    → skip
+            * otherwise                          → show
+        """
+        if not isinstance(notification, dict):
+            return "skip"
+        if notification.get("active") is False:
+            return "skip"
+
+        now = now or dt.datetime.utcnow()
+        expires = notification.get("expires_at")
+        if isinstance(expires, str) and expires.strip():
+            try:
+                if dt.datetime.fromisoformat(expires) <= now:
+                    return "expired"
+            except ValueError:
+                pass
+
+        state = (await self.notification_state()).get(
+            notification.get("id") or "", {}
+        ) or {}
+
+        if state.get("dismissed"):
+            return "skip"
+
+        snoozed_until = state.get("snoozed_until")
+        if isinstance(snoozed_until, str) and snoozed_until:
+            try:
+                if dt.datetime.fromisoformat(snoozed_until) > now:
+                    return "skip"
+            except ValueError:
+                pass
+
+        max_shows = notification.get("max_shows")
+        if isinstance(max_shows, int) and max_shows > 0:
+            if int(state.get("shown", 0)) >= max_shows:
+                return "skip"
+
+        cooldown = notification.get("cooldown_hours")
+        last_shown = state.get("last_shown")
+        if isinstance(cooldown, (int, float)) and cooldown > 0 \
+                and isinstance(last_shown, str) and last_shown:
+            try:
+                delta = now - dt.datetime.fromisoformat(last_shown)
+                if delta.total_seconds() < cooldown * 3600:
+                    return "skip"
+            except ValueError:
+                pass
+
+        return "show"
+
     # -------------------------------------------------------- dispatcher ---
     async def _dispatch(self, method, path, body, *, params=None,
                         files=None, data=None, timeout=None):
         if self.online:
-            return await self._http(method, path, body,
-                                    params, files, data, timeout)
+            return await self._http_with_retry(
+                method, path, body, params, files, data, timeout,
+            )
         return await self._device(method, path, body, params=params)
 
     # -------------------------------------------------------- HTTP path ----
-    async def _http(self, method, path, body, params, files, data, timeout):
+    async def _http_with_retry(self, method, path, body, params, files,
+                               data, timeout):
+        """Wrap ``_http`` with a bounded retry for transient failures.
+
+        Only idempotent requests (GET / HEAD) or requests the backend treats
+        as idempotent (paths covered by an idempotency key) are retried.
+        Everything else is attempted once — matches the previous behavior.
+        """
+        retry_safe = method in ("GET", "HEAD")
+        max_attempts = 2 if retry_safe else 1
+        last_error: ApiError | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                return await self._http(
+                    method, path, body, params, files, data, timeout,
+                )
+            except ApiError as exc:
+                last_error = exc
+                if not (exc.retryable and retry_safe):
+                    raise
+                if attempt >= max_attempts - 1:
+                    raise
+                delay = 0.4 * (attempt + 1)
+                logger.info(
+                    "Retrying %s %s after %.1fs (%s)",
+                    method, path, delay, exc,
+                )
+                await asyncio.sleep(delay)
+        if last_error:
+            raise last_error
+        raise ApiError("درخواست انجام نشد؛ دوباره تلاش کنید.")
+
+    def _client_or_create(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(_TIMEOUT, connect=_TIMEOUT_MIN),
+                limits=httpx.Limits(
+                    max_connections=10, max_keepalive_connections=5,
+                ),
+            )
+        return self._client
+
+    async def _http(self, method, path, body, params, files, data, timeout):
+        client = self._client_or_create()
 
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         url = f"{self.base}/api{path}"
 
         try:
-            r = await self._client.request(
+            r = await client.request(
                 method, url,
                 json=body, params=params, files=files, data=data,
                 headers=headers, timeout=timeout or _TIMEOUT,
             )
-        except (httpx.TimeoutException, httpx.HTTPError, ValueError):
-            raise ApiError("ارتباط با سرور برقرار نشد. لطفاً دوباره تلاش کنید.",
-                           network=True)
+        except httpx.TimeoutException as exc:
+            logger.warning("HTTP timeout on %s %s: %s", method, url, exc)
+            raise ApiError(
+                "سرور پاسخ نداد؛ اتصال اینترنت را بررسی و دوباره تلاش کنید.",
+                network=True, retryable=True,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("HTTP error on %s %s: %s", method, url, exc)
+            raise ApiError(
+                "ارتباط با سرور برقرار نشد. لطفاً دوباره تلاش کنید.",
+                network=True, retryable=True,
+            )
 
         try:
             payload = r.json() if r.content else {}
@@ -461,9 +732,39 @@ class Api:
 
         if r.status_code >= 400:
             detail = payload.get("detail") if isinstance(payload, dict) else None
-            raise ApiError(detail if isinstance(detail, str) else "خطایی رخ داد.")
+            logger.info(
+                "API %s %s returned %s (detail=%r)",
+                method, path, r.status_code, detail,
+            )
+            message = self._translate_http_error(r.status_code, detail)
+            raise ApiError(
+                message,
+                network=r.status_code in (502, 503, 504),
+                retryable=r.status_code >= 500 or r.status_code == 429,
+                status=r.status_code,
+            )
 
         return payload
+
+    @staticmethod
+    def _translate_http_error(status: int, detail: Any) -> str:
+        """Map an HTTP status / server detail to a friendly Persian message.
+
+        The server's own Persian ``detail`` is preferred when it looks like a
+        short sentence, otherwise a generic fallback is used so callers never
+        see stack traces, JSON blobs or English error strings.
+        """
+        if isinstance(detail, str):
+            clean = detail.strip()
+            if (
+                1 <= len(clean) <= 220
+                and not re.search(r"[{}<>]|Traceback|Error:|Exception",
+                                  clean)
+            ):
+                return clean
+        return _SAFE_ERRORS.get(
+            status, "خطایی رخ داد؛ دوباره تلاش کنید."
+        )
 
     # -------------------------------------------------------- device path --
     async def _provision(self) -> None:
@@ -490,9 +791,7 @@ class Api:
         path = path.split("?", 1)[0]
 
         # ---- auth ----
-        if path == "/auth/state":
-            raise ApiError("احراز هویت به اتصال سرور نیاز دارد.")
-        if path == "/auth/me":
+        if path in ("/auth/state", "/auth/me"):
             raise ApiError("احراز هویت به اتصال سرور نیاز دارد.")
 
         # ---- connections ----
@@ -631,9 +930,12 @@ class Api:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
                 r = await c.post(f"{_EITAA_BASE}/{token}/getMe")
             data = r.json()
-        except (httpx.HTTPError, ValueError, AttributeError):
-            raise ApiError("ارتباط با ایتا برقرار نشد. اتصال اینترنت را بررسی کنید.",
-                           network=True)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            logger.warning("getMe request failed: %s", type(exc).__name__)
+            raise ApiError(
+                "ارتباط با ایتا برقرار نشد. اتصال اینترنت را بررسی کنید.",
+                network=True, retryable=True,
+            )
 
         if (r.status_code != 200 or not isinstance(data, dict)
                 or data.get("ok") is not True
@@ -806,7 +1108,7 @@ class Api:
                         )
                     else:
                         error = "پاسخ نامعتبر از ایتا"
-                    d["error"] = error.replace(token, "***")
+                    d["error"] = _mask_secret(error, token)
 
         post["status"] = "published" if success else "failed"
         await self._log(
@@ -986,7 +1288,7 @@ class Api:
         try:
             output = await self._ai_client.complete(_SYSTEM, user_msg)
         except AIServiceError as exc:
-            raise ApiError(str(exc), network=True) from exc
+            raise ApiError(str(exc), network=True, retryable=True) from exc
         return await self._record_ai_usage(action, text, output)
 
     async def _ai(self, body: dict) -> dict:
@@ -1061,7 +1363,7 @@ class Api:
             return await self._record_ai_usage(action, text, out)
 
         candidates = models if provider == "groq" else [model]
-        failures = []
+        failures: list[ApiError] = []
         for candidate in candidates:
             try:
                 out = await self._complete_openai_compatible(
@@ -1075,6 +1377,7 @@ class Api:
                 "هیچ‌یک از مدل‌های هوش مصنوعی در دسترس نبودند. "
                 "اتصال، کلید API و دسترسی حساب را بررسی کنید.",
                 network=all(error.network for error in failures),
+                retryable=True,
             ) from failures[-1]
         raise failures[-1]
 
@@ -1103,17 +1406,20 @@ class Api:
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
             raise ApiError(
                 "ارتباط با سرویس هوش مصنوعی برقرار نشد.",
-                network=True,
+                network=True, retryable=True,
             ) from exc
 
         if r.status_code != 200:
             if r.status_code in (401, 403):
                 raise ApiError("کلید API نامعتبر است یا دسترسی لازم را ندارد.")
             if r.status_code == 429:
-                raise ApiError("محدودیت درخواست سرویس AI؛ کمی بعد دوباره تلاش کنید.")
+                raise ApiError(
+                    "محدودیت درخواست سرویس AI؛ کمی بعد دوباره تلاش کنید.",
+                    retryable=True, status=429,
+                )
             if r.status_code == 404:
                 raise ApiError("مدل انتخاب‌شده در سرویس پیدا نشد.")
-            raise ApiError("سرویس هوش مصنوعی پاسخگو نیست.")
+            raise ApiError("سرویس هوش مصنوعی پاسخگو نیست.", retryable=True)
 
         try:
             content = data["choices"][0]["message"]["content"]
@@ -1123,7 +1429,9 @@ class Api:
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ApiError("پاسخ نامعتبر از سرویس هوش مصنوعی.") from exc
 
-    async def _complete_anthropic(self, key: str, model: str, user_msg: str) -> str:
+    async def _complete_anthropic(
+        self, key: str, model: str, user_msg: str
+    ) -> str:
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT_AI) as client:
                 response = await client.post(
@@ -1141,15 +1449,20 @@ class Api:
                     },
                 )
                 data = response.json()
-        except (httpx.HTTPError, ValueError):
-            raise ApiError("ارتباط با سرویس هوش مصنوعی برقرار نشد.",
-                           network=True)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ApiError(
+                "ارتباط با سرویس هوش مصنوعی برقرار نشد.",
+                network=True, retryable=True,
+            ) from exc
         if response.status_code in (401, 403):
             raise ApiError("کلید API نامعتبر است یا دسترسی لازم را ندارد.")
         if response.status_code == 429:
-            raise ApiError("محدودیت درخواست سرویس AI؛ کمی بعد دوباره تلاش کنید.")
+            raise ApiError(
+                "محدودیت درخواست سرویس AI؛ کمی بعد دوباره تلاش کنید.",
+                retryable=True, status=429,
+            )
         if response.status_code != 200:
-            raise ApiError("سرویس هوش مصنوعی پاسخگو نیست.")
+            raise ApiError("سرویس هوش مصنوعی پاسخگو نیست.", retryable=True)
         try:
             result = "".join(
                 block["text"] for block in data["content"]
@@ -1162,7 +1475,9 @@ class Api:
             raise ApiError("پاسخ خالی از سرویس هوش مصنوعی.")
         return result
 
-    async def _record_ai_usage(self, action: str, text: str, output: str) -> dict:
+    async def _record_ai_usage(
+        self, action: str, text: str, output: str
+    ) -> dict:
         usage = await self._load("ai_usage", [])
         usage.append({"at": _iso_now(), "action": action,
                       "chars_in": len(text), "chars_out": len(output)})
