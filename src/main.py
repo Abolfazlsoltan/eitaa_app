@@ -179,6 +179,13 @@ def pill(label, color):
 # ======================================================================= App
 
 class App:
+    # -------- Markdown / code-fence parsing ----------
+    # Fenced code block: ```lang\ncode``` (language optional, newline required)
+    _CODE_FENCE = re.compile(
+        r"```([A-Za-z0-9_+\-.]*)[ \t]*\n(.*?)```",
+        re.DOTALL,
+    )
+
     def __init__(self, page: ft.Page, loop: asyncio.AbstractEventLoop, prefs):
         self.page = page
         self.loop = loop
@@ -895,6 +902,222 @@ class App:
         except Exception:
             self.toast("بازکردن پیوند ممکن نشد؛ اتصال و مرورگر را بررسی کنید.",
                        error=True)
+
+    # ------------------------------------------------------ markdown util --
+    def _is_dark(self) -> bool:
+        """True when the effective UI theme is dark."""
+        brightness = getattr(self.page, "platform_brightness", None)
+        mode = self.theme_mode
+        return mode == "dark" or (
+            mode == "system" and brightness == ft.Brightness.DARK
+        )
+
+    def _markdown_style_sheet(self) -> ft.MarkdownStyleSheet:
+        """Theme-aware style sheet so markdown matches the app palette."""
+        dark = self._is_dark()
+        text_color = Palette.TEXT_LIGHT
+        muted = Palette.MUTED_LIGHT
+        code_bg = "#0B1220" if dark else "#F1F5F9"
+        code_color = "#E2E8F0" if dark else "#1E293B"
+        inline_code_bg = "#1E293B" if dark else "#EEF2F7"
+        link = Palette.PRIMARY
+        base = ft.TextStyle(size=14, color=text_color)
+        return ft.MarkdownStyleSheet(
+            p_text_style=base,
+            a_text_style=ft.TextStyle(
+                color=link,
+                decoration=ft.TextDecoration.UNDERLINE,
+                decoration_color=link,
+            ),
+            em_text_style=ft.TextStyle(italic=True, color=text_color),
+            strong_text_style=ft.TextStyle(
+                weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            code_text_style=ft.TextStyle(
+                font_family="monospace",
+                size=12.5,
+                color=code_color,
+                bgcolor=inline_code_bg,
+            ),
+            h1_text_style=ft.TextStyle(
+                size=22, weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            h2_text_style=ft.TextStyle(
+                size=19, weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            h3_text_style=ft.TextStyle(
+                size=17, weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            h4_text_style=ft.TextStyle(
+                size=15, weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            h5_text_style=ft.TextStyle(
+                size=14, weight=ft.FontWeight.BOLD, color=text_color,
+            ),
+            h6_text_style=ft.TextStyle(
+                size=13, weight=ft.FontWeight.BOLD, color=muted,
+            ),
+            blockquote_text_style=ft.TextStyle(
+                color=muted, italic=True,
+            ),
+            blockquote_decoration=ft.BoxDecoration(
+                border=ft.Border.only(
+                    left=ft.BorderSide(3, Palette.PRIMARY)
+                ),
+                bgcolor=(
+                    "#111827" if dark else "#F8FAFC"
+                ),
+            ),
+            blockquote_padding=ft.Padding.symmetric(
+                horizontal=12, vertical=8,
+            ),
+            codeblock_padding=12,
+            codeblock_decoration=ft.BoxDecoration(
+                bgcolor=code_bg,
+                border_radius=10,
+            ),
+            block_spacing=8,
+            list_bullet_text_style=base,
+        )
+
+    def _markdown_widget(self, text: str) -> ft.Control:
+        """A theme-aware Markdown view for assistant prose."""
+        dark = self._is_dark()
+        return ft.Markdown(
+            value=text,
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+            code_theme=(
+                ft.MarkdownCodeTheme.ATOM_ONE_DARK
+                if dark
+                else ft.MarkdownCodeTheme.GITHUB
+            ),
+            auto_follow_links=False,
+            on_tap_link=lambda e: self.spawn(self._open_external(e.data)),
+            md_style_sheet=self._markdown_style_sheet(),
+        )
+
+    def _split_markdown(self, text: str):
+        """Split assistant text into prose / fenced-code segments.
+
+        Returns a list of tuples:
+            ("prose", str)  |  ("code", (language, code_text))
+        Unterminated fences are returned as part of the prose.
+        """
+        segments: list[tuple[str, object]] = []
+        last = 0
+        for match in self._CODE_FENCE.finditer(text):
+            start, end = match.span()
+            if start > last:
+                segments.append(("prose", text[last:start]))
+            language = (match.group(1) or "").strip()
+            code = match.group(2) or ""
+            if code.endswith("\n"):
+                code = code[:-1]
+            segments.append(("code", (language, code)))
+            last = end
+        if last < len(text):
+            segments.append(("prose", text[last:]))
+        if not segments:
+            segments.append(("prose", text))
+        return segments
+
+    def _code_block_card(self, language: str, code: str) -> ft.Control:
+        """A styled fenced-code card with a clipboard copy action."""
+        dark = self._is_dark()
+        code_bg = "#0B1220" if dark else "#0F172A"
+        code_fg = "#E2E8F0" if dark else "#F1F5F9"
+
+        async def copy_code(e):
+            try:
+                clip = getattr(self.page, "clipboard", None)
+                setter = getattr(clip, "set", None) if clip is not None else None
+                if callable(setter):
+                    result = setter(code)
+                    if asyncio.iscoroutine(result):
+                        await result
+                else:
+                    page_setter = getattr(self.page, "set_clipboard", None)
+                    if callable(page_setter):
+                        result = page_setter(code)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    else:
+                        raise RuntimeError("clipboard unavailable")
+                self.toast("کد در کلیپ‌بورد کپی شد.")
+            except Exception:
+                self.toast(
+                    "کپی خودکار ناموفق بود؛ متن کد را دستی انتخاب کنید.",
+                    error=True,
+                )
+
+        header = ft.Row([
+            ft.Container(
+                content=T(
+                    (language or "code").upper(),
+                    size=10.5,
+                    color=Palette.MUTED_LIGHT,
+                    weight=ft.FontWeight.W_600,
+                ),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                border_radius=6,
+                bgcolor=ft.Colors.with_opacity(0.10, Palette.PRIMARY),
+            ),
+            ft.Container(expand=True),
+            ft.IconButton(
+                icon=ft.Icons.CONTENT_COPY,
+                icon_size=16,
+                icon_color=Palette.MUTED_LIGHT,
+                tooltip="کپی کد",
+                on_click=lambda e: self.spawn(copy_code(e)),
+            ),
+        ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        return ft.Container(
+            content=ft.Column([
+                header,
+                ft.Container(
+                    content=ft.Text(
+                        code,
+                        font_family="monospace",
+                        size=12,
+                        color=code_fg,
+                        selectable=True,
+                        no_wrap=False,
+                    ),
+                    padding=12,
+                    border_radius=10,
+                    bgcolor=code_bg,
+                ),
+            ], spacing=6, tight=True),
+            padding=8,
+            border_radius=12,
+            bgcolor=Palette.CARD_LIGHT,
+            border=ft.Border.all(
+                1,
+                "#1F2A3D" if dark else "#E2E8F0",
+            ),
+        )
+
+    def _render_markdown_body(self, text: str) -> list[ft.Control]:
+        """Convert assistant markdown text to a list of Flet controls."""
+        controls: list[ft.Control] = []
+        if not isinstance(text, str) or not text:
+            return controls
+        for kind, payload in self._split_markdown(text):
+            if kind == "code":
+                language, code = payload  # type: ignore[misc]
+                if code.strip():
+                    controls.append(self._code_block_card(language, code))
+            else:
+                stripped = payload.strip("\n")  # type: ignore[union-attr]
+                if stripped.strip():
+                    controls.append(self._markdown_widget(stripped))
+        if not controls:
+            controls.append(T(
+                text, size=14, color=Palette.TEXT_LIGHT, selectable=True,
+            ))
+        return controls
 
     def _stat_tile(self, label, value, icon, color):
         return ft.Container(
@@ -1628,78 +1851,104 @@ class App:
                     padding=ft.Padding.symmetric(vertical=36, horizontal=20),
                     alignment=ft.Alignment(0, 0),
                 ))
+
             for index, message in enumerate(self.chat_messages):
                 is_user = message["role"] == "user"
                 failed = message.get("status") == "failed"
                 waiting = message.get("status") == "waiting"
-                bubble = ft.Container(
-                    content=ft.Column([
+
+                body_controls: list[ft.Control] = []
+
+                if is_user:
+                    body_controls.append(T(
+                        message["text"],
+                        size=14,
+                        color="#FFFFFF",
+                        selectable=True,
+                    ))
+                else:
+                    body_controls.extend(
+                        self._render_markdown_body(message.get("text", ""))
+                    )
+
+                if waiting:
+                    body_controls.append(ft.Row([
+                        ft.ProgressRing(
+                            width=12, height=12, stroke_width=2,
+                            color="#FFFFFF" if is_user else Palette.PRIMARY,
+                        ),
                         T(
-                            message["text"],
-                            size=14,
-                            color="#FFFFFF" if is_user else Palette.TEXT_LIGHT,
-                            selectable=True,
+                            "در حال دریافت پاسخ…",
+                            size=11,
+                            color="#FFFFFF" if is_user else Palette.MUTED_LIGHT,
                         ),
-                        *(
-                            [ft.Row([
-                                ft.ProgressRing(
-                                    width=12, height=12, stroke_width=2,
-                                    color="#FFFFFF",
-                                ),
-                                T("در حال دریافت پاسخ…", size=11,
-                                  color="#FFFFFF"),
-                            ], spacing=8)]
-                            if waiting else []
+                    ], spacing=8))
+
+                if failed:
+                    body_controls.append(ft.Row([
+                        T(
+                            "پاسخ آماده نشد؛ متن شما حفظ شده است.",
+                            size=11,
+                            color="#FFE1E1" if is_user else Palette.DANGER,
                         ),
-                        *(
-                            [ft.Row([
-                                T("پاسخ آماده نشد؛ متن شما حفظ شده است.",
-                                  size=11, color="#FFE1E1"),
-                                ft.TextButton(
-                                    "تلاش دوباره",
-                                    icon=ft.Icons.REFRESH,
-                                    on_click=lambda e, i=index:
-                                        self.spawn(send_message(
-                                            self.chat_messages[i]["text"],
-                                            retry_index=i,
-                                        )),
-                                ),
-                            ], wrap=True)]
-                            if failed else []
+                        ft.TextButton(
+                            "تلاش دوباره",
+                            icon=ft.Icons.REFRESH,
+                            on_click=lambda e, i=index:
+                                self.spawn(send_message(
+                                    self.chat_messages[i]["text"],
+                                    retry_index=i,
+                                )),
                         ),
-                        *(
-                            [ft.TextButton(
-                                "ذخیره به‌عنوان پیش‌نویس",
-                                icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
-                                on_click=lambda e, text=message["text"]:
-                                    self.spawn(save_draft(text)),
-                            )]
-                            if not is_user and message.get("status") == "ready"
-                            else []
+                    ], wrap=True))
+
+                if not is_user and message.get("status") == "ready":
+                    body_controls.append(ft.TextButton(
+                        "ذخیره به‌عنوان پیش‌نویس",
+                        icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
+                        on_click=lambda e, text=message["text"]:
+                            self.spawn(save_draft(text)),
+                    ))
+
+                if is_user:
+                    bubble = ft.Container(
+                        content=ft.Column(
+                            body_controls, spacing=6, tight=True,
                         ),
-                    ], spacing=6, tight=True),
-                    padding=14,
-                    border_radius=ft.BorderRadius(
-                        18, 18, 5 if is_user else 18, 18
-                    ),
-                    bgcolor=(
-                        "#B42335" if failed else
-                        "#6246D9" if is_user else Palette.CARD_LIGHT
-                    ),
-                    shadow=ft.BoxShadow(
-                        blur_radius=14,
-                        color="#0F172A10",
-                        offset=ft.Offset(0, 3),
-                    ),
-                    width=280,
-                )
-                transcript.controls.append(ft.Row(
-                    [bubble],
-                    alignment=(
-                        ft.MainAxisAlignment.END if is_user
-                        else ft.MainAxisAlignment.START
-                    ),
-                ))
+                        padding=14,
+                        border_radius=ft.BorderRadius(18, 18, 5, 18),
+                        bgcolor="#6246D9",
+                        shadow=ft.BoxShadow(
+                            blur_radius=14,
+                            color="#0F172A10",
+                            offset=ft.Offset(0, 3),
+                        ),
+                        width=280,
+                    )
+                    transcript.controls.append(ft.Row(
+                        [bubble],
+                        alignment=ft.MainAxisAlignment.END,
+                    ))
+                else:
+                    bubble = ft.Container(
+                        content=ft.Column(
+                            body_controls, spacing=6, tight=True,
+                        ),
+                        padding=14,
+                        border_radius=ft.BorderRadius(18, 18, 18, 5),
+                        bgcolor="#B42335" if failed else Palette.CARD_LIGHT,
+                        shadow=ft.BoxShadow(
+                            blur_radius=14,
+                            color="#0F172A10",
+                            offset=ft.Offset(0, 3),
+                        ),
+                        expand=True,
+                    )
+                    transcript.controls.append(ft.Row(
+                        [bubble],
+                        alignment=ft.MainAxisAlignment.START,
+                    ))
+
             self.page.update()
 
         async def save_draft(text: str):
@@ -1817,7 +2066,8 @@ class App:
                         ft.Row([action], alignment=ft.MainAxisAlignment.END),
                         ft.Row([prompt, send_button], spacing=8,
                                vertical_alignment=ft.CrossAxisAlignment.END),
-                        T("پاسخ‌ها پیش از انتشار قابل ویرایش‌اند.",
+                        T("پاسخ‌ها با قالب‌بندی Markdown نمایش داده می‌شوند؛ "
+                          "پیش از انتشار قابل ویرایش‌اند.",
                           size=10, color=Palette.MUTED_LIGHT),
                     ], spacing=6),
                     padding=ft.Padding.only(
@@ -2808,6 +3058,7 @@ class App:
                         T(
                             "ایده‌پردازی، بازنویسی، اصلاح نگارش، ترجمه و "
                             "ساخت عنوان را در گفت‌وگو انجام دهید. پاسخ‌ها "
+                            "با قالب‌بندی Markdown نمایش داده می‌شوند و "
                             "پیش از انتشار قابل ویرایش و ذخیره به‌عنوان "
                             "پیش‌نویس هستند.",
                             size=13,
