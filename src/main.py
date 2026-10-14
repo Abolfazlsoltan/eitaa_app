@@ -7,19 +7,30 @@ EitaaYar, and lightweight analytics — all through a single, cohesive UI.
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 import datetime as dt
 import io
 import json
 import logging
+import mimetypes
 import re
+import time
 from pathlib import Path
 
 import flet as ft
 
 import config
 from api import Api, ApiError
-from fa import digits, jdate, jfull_utc, to_utc_iso
+from fa import (
+    combine_local,
+    digits,
+    humanize_bytes,
+    is_valid_username,
+    jdate,
+    jfull_utc,
+    to_utc_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +107,16 @@ ACCENTS = {
 
 # Tabs shown in the bottom navigation bar, in order.
 NAV_VIEWS = ["home", "posts", "chat", "settings"]
+
+# Map notification `icon` keys to Flet icon constants.
+_NOTIFICATION_ICONS = {
+    "auto_awesome": ft.Icons.AUTO_AWESOME,
+    "person_outline": ft.Icons.PERSON_OUTLINE,
+    "system_update_alt": ft.Icons.SYSTEM_UPDATE_ALT,
+    "new_releases": ft.Icons.NEW_RELEASES,
+    "info_outline": ft.Icons.INFO_OUTLINE,
+    "feedback_outlined": ft.Icons.FEEDBACK_OUTLINED,
+}
 
 
 # ==================================================================== helpers
@@ -185,6 +206,12 @@ class App:
         r"```([A-Za-z0-9_+\-.]*)[ \t]*\n(.*?)```",
         re.DOTALL,
     )
+    # Patterns that identify technical content that must never reach the UI.
+    _TECHNICAL_RE = re.compile(
+        r"Traceback|File \"|<[^>]{1,80}>|Exception|"
+        r"https?://|/api/|HTTP \d{3}|AttributeError|KeyError|"
+        r"TypeError|ValueError"
+    )
 
     def __init__(self, page: ft.Page, loop: asyncio.AbstractEventLoop, prefs):
         self.page = page
@@ -196,6 +223,7 @@ class App:
         self.theme_mode = "light"
         self.accent_name = "آبی"
         self.chat_messages: list[dict] = []
+        self._last_notification_at = 0.0
 
         self.body = ft.Container(expand=True)
         self.api = Api(Storage(prefs))
@@ -208,11 +236,32 @@ class App:
     def spawn(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
+    def _safe_message(self, message) -> str:
+        """Return a message that is safe to show in the UI.
+
+        Strips technical noise (stack traces, URLs, HTTP statuses, English
+        exception text) and truncates overly long messages. When nothing
+        usable remains, a generic Persian fallback is returned so the user
+        always has a next step.
+        """
+        fallback = "خطایی رخ داد؛ لطفاً دوباره تلاش کنید."
+        if not isinstance(message, str):
+            return fallback
+        clean = message.strip()
+        if not clean:
+            return fallback
+        if self._TECHNICAL_RE.search(clean):
+            return fallback
+        if len(clean) > 220:
+            return fallback
+        return clean
+
     def toast(self, msg: str, error: bool = False):
+        text = self._safe_message(msg) if error else str(msg)
         color = Palette.DANGER if error else None
         self.page.show_dialog(
             ft.SnackBar(
-                content=T(msg, color="#FFFFFF" if color else None),
+                content=T(text, color="#FFFFFF" if color else None),
                 bgcolor=color,
                 behavior=ft.SnackBarBehavior.FLOATING,
                 margin=16,
@@ -284,6 +333,42 @@ class App:
             bgcolor="#FFFFFF20",
             ink=on_click is not None,
             on_click=on_click,
+        )
+
+    # ----------------------------------------------------------- skeletons
+    def _skeleton_line(self, *, width=None, height=12):
+        return ft.Container(
+            width=width,
+            height=height,
+            border_radius=height // 2,
+            bgcolor="#E2E8F0",
+        )
+
+    def _skeleton_card(self, lines: int = 3):
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    self._skeleton_line(width=110, height=14),
+                    ft.Container(expand=True),
+                    self._skeleton_line(width=64, height=20),
+                ], spacing=8),
+                self._skeleton_line(width=180, height=10),
+                *[
+                    self._skeleton_line(height=10)
+                    for _ in range(max(0, lines - 2))
+                ],
+            ], spacing=10, tight=True),
+            padding=16,
+            border_radius=18,
+            bgcolor=Palette.CARD_LIGHT,
+            shadow=ft.BoxShadow(blur_radius=14, color="#0F172A08",
+                                offset=ft.Offset(0, 3)),
+        )
+
+    def _skeleton_list(self, count: int = 3):
+        return ft.Column(
+            [self._skeleton_card() for _ in range(max(1, count))],
+            spacing=10,
         )
 
     # =========================================================== boot flow =
@@ -414,8 +499,8 @@ class App:
                 self._logo(80),
                 T("اتصال به سرور برقرار نشد", size=20,
                   weight=ft.FontWeight.BOLD, color=Palette.TEXT_LIGHT),
-                T(message, size=13, color=Palette.MUTED_LIGHT,
-                  text_align=ft.TextAlign.CENTER),
+                T(self._safe_message(message), size=13,
+                  color=Palette.MUTED_LIGHT, text_align=ft.TextAlign.CENTER),
                 btn_primary(
                     "تلاش دوباره برای اتصال",
                     lambda e: self.spawn(self._retry_backend()),
@@ -540,15 +625,30 @@ class App:
         self.page.navigation_bar = (
             self._nav_bar(NAV_VIEWS.index(name)) if name in NAV_VIEWS else None
         )
-        self.body.content = ft.Container(
-            content=ft.Column([
-                ft.ProgressRing(width=24, height=24, stroke_width=2.5,
-                                color=Palette.PRIMARY),
-            ], alignment=ft.MainAxisAlignment.CENTER,
-               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            expand=True,
-            bgcolor=Palette.SURFACE_LIGHT,
-        )
+
+        if name in NAV_VIEWS:
+            # Tab views: render a lightweight skeleton while data loads.
+            self.body.content = ft.Container(
+                content=ft.Column([
+                    self._skeleton_list(2),
+                    ft.Container(height=12),
+                    self._skeleton_list(2),
+                    ft.Container(height=80),
+                ], scroll=ft.ScrollMode.AUTO, spacing=0, expand=True),
+                padding=16,
+                expand=True,
+                bgcolor=Palette.SURFACE_LIGHT,
+            )
+        else:
+            self.body.content = ft.Container(
+                content=ft.Column([
+                    ft.ProgressRing(width=24, height=24, stroke_width=2.5,
+                                    color=Palette.PRIMARY),
+                ], alignment=ft.MainAxisAlignment.CENTER,
+                   horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                expand=True,
+                bgcolor=Palette.SURFACE_LIGHT,
+            )
         self.page.update()
 
         try:
@@ -565,6 +665,11 @@ class App:
 
         self.body.content = content
         self.page.update()
+
+        # Notifications only appear on primary tab screens, never on sub-
+        # screens such as the composer, and never while a dialog is open.
+        if config.FEATURES_GLOBAL_NOTIFICATIONS and name in NAV_VIEWS:
+            asyncio.create_task(self._maybe_show_notification())
 
     def _fab_for(self, view):
         if view in ("home", "posts"):
@@ -588,6 +693,7 @@ class App:
     def _error_view(self, message, back_to="home", retry_args=()):
         # A failed sub-screen should go back to a screen that can render.
         target = back_to if back_to in NAV_VIEWS else "home"
+        safe = self._safe_message(message)
         return ft.Container(
             content=ft.Column([
                 ft.Container(height=80),
@@ -597,7 +703,7 @@ class App:
                     alignment=ft.Alignment(0, 0),
                 ),
                 ft.Container(height=16),
-                T(message, size=14, color=Palette.MUTED_LIGHT,
+                T(safe, size=14, color=Palette.MUTED_LIGHT,
                   text_align=ft.TextAlign.CENTER),
                 ft.Container(height=24),
                 *(
@@ -623,15 +729,12 @@ class App:
                 step["n"] += 1
                 render()
                 return
-            try:
-                await self.api.bootstrap()
-            except Exception:
-                pass
-            self.channels = await self._safe_get("/channels", [])
-            if self.channels:
-                await self.enter()
-            else:
-                self.channel_step()
+            if (
+                config.FEATURES_LOCAL_PROFILE
+                and not await self.api.storage.get("profile_prompted")
+            ):
+                return self._render_profile_step()
+            await self._continue_after_onboarding()
 
         def render():
             views = [
@@ -694,6 +797,103 @@ class App:
             self.page.update()
 
         render()
+
+    def _render_profile_step(self):
+        """Optional profile step shown after the onboarding walkthrough."""
+        name_field = tf("نام نمایشی", hint_text="اختیاری")
+        username_field = tf("نام کاربری", hint_text="اختیاری")
+        busy = {"value": False}
+
+        async def save_and_continue(e=None):
+            if busy["value"]:
+                return
+            busy["value"] = True
+            name = (name_field.value or "").strip()
+            username = (username_field.value or "").strip()
+            if username and not is_valid_username(
+                username,
+                min_len=config.PROFILE_USERNAME_MIN,
+                max_len=config.PROFILE_USERNAME_MAX,
+                allowed_chars=config.PROFILE_USERNAME_ALLOWED_CHARS,
+            ):
+                busy["value"] = False
+                return self.toast(
+                    "نام کاربری باید ۳ تا ۳۲ نویسه و بدون فاصله باشد.",
+                    error=True,
+                )
+            try:
+                if name or username:
+                    await self.api.save_profile(
+                        name=name, username=username,
+                    )
+                await self.api.storage.set("profile_prompted", "1")
+            except ApiError as exc:
+                self.toast(str(exc), error=True)
+            finally:
+                busy["value"] = False
+            await self._continue_after_onboarding()
+
+        async def skip(e=None):
+            try:
+                await self.api.storage.set("profile_prompted", "1")
+            except Exception:
+                pass
+            await self._continue_after_onboarding()
+
+        self.body.content = ft.Container(
+            content=ft.Column([
+                ft.Container(height=40),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.PERSON_OUTLINE, size=48,
+                                    color="#FFFFFF"),
+                    width=120, height=120,
+                    alignment=ft.Alignment(0, 0),
+                    border_radius=32,
+                    gradient=ft.LinearGradient(
+                        begin=ft.Alignment.TOP_LEFT,
+                        end=ft.Alignment.BOTTOM_RIGHT,
+                        colors=[Palette.ACCENT, Palette.PRIMARY],
+                    ),
+                ),
+                ft.Container(height=32),
+                T("پروفایل خودت را بساز", size=22,
+                  weight=ft.FontWeight.BOLD, color=Palette.TEXT_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                T("این اطلاعات فقط روی دستگاه تو ذخیره می‌شود "
+                  "و می‌توانی هر زمان آن را تغییر دهی.",
+                  size=13, color=Palette.MUTED_LIGHT,
+                  text_align=ft.TextAlign.CENTER),
+                ft.Container(height=24),
+                surface_card(
+                    name_field,
+                    username_field,
+                    T("این گام کاملاً اختیاری است.",
+                      size=11, color=Palette.MUTED_LIGHT),
+                ),
+                ft.Container(height=16),
+                ft.Row([
+                    btn_ghost("رد کردن", lambda e: self.spawn(skip())),
+                    btn_primary("ذخیره و ادامه",
+                                lambda e: self.spawn(save_and_continue())),
+                ], alignment=ft.MainAxisAlignment.CENTER, spacing=10),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+               spacing=10, scroll=ft.ScrollMode.AUTO),
+            padding=24,
+            expand=True,
+            bgcolor=Palette.SURFACE_LIGHT,
+        )
+        self.page.update()
+
+    async def _continue_after_onboarding(self):
+        try:
+            await self.api.bootstrap()
+        except Exception:
+            pass
+        self.channels = await self._safe_get("/channels", [])
+        if self.channels:
+            await self.enter()
+        else:
+            self.channel_step()
 
     def channel_step(self):
         """Last onboarding screen: connect the first channel."""
@@ -778,6 +978,116 @@ class App:
         })
         self.channels = await self._safe_get("/channels", self.channels)
         return added or True
+
+    # ===================================================== notifications ==
+    async def _maybe_show_notification(self):
+        """Show the highest-priority notification that is due, if any."""
+        if not config.FEATURES_GLOBAL_NOTIFICATIONS:
+            return
+        # Do not show two notifications back-to-back in a few seconds.
+        if time.time() - self._last_notification_at < 6:
+            return
+        # Only when we are on a primary tab, never while the splash or auth
+        # screen is up.
+        if self.view not in NAV_VIEWS:
+            return
+        try:
+            notifications = await self.api.list_notifications()
+        except Exception:
+            return
+        now = dt.datetime.utcnow()
+        for notification in notifications:
+            try:
+                decision = await self.api.notification_decision(
+                    notification, now,
+                )
+            except Exception:
+                continue
+            if decision != "show":
+                continue
+            nid = notification.get("id") or ""
+            try:
+                await self.api.record_notification_shown(nid)
+            except Exception:
+                pass
+            self._last_notification_at = time.time()
+            self._show_notification_dialog(notification)
+            return
+
+    def _show_notification_dialog(self, notification):
+        nid = notification.get("id") or ""
+        icon_key = notification.get("icon", "info_outline")
+        icon = _NOTIFICATION_ICONS.get(icon_key, ft.Icons.INFO_OUTLINE)
+
+        async def dismiss_and_close(_=None):
+            try:
+                await self.api.dismiss_notification(nid)
+            except Exception:
+                pass
+            self.page.pop_dialog()
+
+        async def snooze_and_close(_=None):
+            try:
+                await self.api.snooze_notification(nid, days=3)
+            except Exception:
+                pass
+            self.page.pop_dialog()
+
+        async def run_action(_=None):
+            self.page.pop_dialog()
+            await self._handle_notification_action(
+                notification.get("action_key")
+            )
+
+        action_label = notification.get("action_label")
+        actions: list[ft.Control] = []
+        if action_label:
+            actions.append(ft.FilledButton(
+                action_label,
+                on_click=lambda e: self.spawn(run_action()),
+            ))
+        actions.append(ft.TextButton(
+            notification.get("secondary_label") or "بعداً",
+            on_click=lambda e: self.spawn(snooze_and_close()),
+        ))
+        actions.append(ft.TextButton(
+            "دیگر نشان نده",
+            on_click=lambda e: self.spawn(dismiss_and_close()),
+        ))
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=False,
+            content=ft.Column([
+                ft.Container(
+                    content=ft.Icon(icon, size=26, color="#FFFFFF"),
+                    width=52, height=52, border_radius=18,
+                    alignment=ft.Alignment(0, 0),
+                    gradient=ft.LinearGradient(
+                        colors=[Palette.ACCENT, Palette.PRIMARY],
+                    ),
+                ),
+                T(notification.get("title", ""),
+                  size=17, weight=ft.FontWeight.BOLD,
+                  color=Palette.TEXT_LIGHT),
+                T(notification.get("body", ""), size=13,
+                  color=Palette.MUTED_LIGHT),
+            ], spacing=12, tight=True,
+               horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            actions=actions,
+        ))
+
+    async def _handle_notification_action(self, action_key):
+        if not action_key:
+            return
+        if action_key == "open_help":
+            await self.go("help")
+        elif action_key == "open_profile":
+            await self._profile_dialog()
+        elif action_key == "check_updates":
+            await self.go("updates")
+        elif action_key == "open_feedback":
+            await self.go("feedback")
+        # Unknown keys are ignored; the notification still counts as shown.
 
     # =============================================================== views =
     async def v_home(self):
@@ -895,13 +1205,17 @@ class App:
         )
 
     async def _open_external(self, url: str):
+        if not isinstance(url, str) or not url.strip():
+            return
         try:
             await self.url_launcher.launch_url(
                 url, mode=ft.LaunchMode.EXTERNAL_APPLICATION
             )
         except Exception:
-            self.toast("بازکردن پیوند ممکن نشد؛ اتصال و مرورگر را بررسی کنید.",
-                       error=True)
+            self.toast(
+                "بازکردن پیوند ممکن نشد؛ اتصال و مرورگر را بررسی کنید.",
+                error=True,
+            )
 
     # ------------------------------------------------------ markdown util --
     def _is_dark(self) -> bool:
@@ -964,9 +1278,7 @@ class App:
                 border=ft.Border.only(
                     left=ft.BorderSide(3, Palette.PRIMARY)
                 ),
-                bgcolor=(
-                    "#111827" if dark else "#F8FAFC"
-                ),
+                bgcolor=("#111827" if dark else "#F8FAFC"),
             ),
             blockquote_padding=ft.Padding.symmetric(
                 horizontal=12, vertical=8,
@@ -989,8 +1301,7 @@ class App:
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
             code_theme=(
                 ft.MarkdownCodeTheme.ATOM_ONE_DARK
-                if dark
-                else ft.MarkdownCodeTheme.GITHUB
+                if dark else ft.MarkdownCodeTheme.GITHUB
             ),
             auto_follow_links=False,
             on_tap_link=lambda e: self.spawn(self._open_external(e.data)),
@@ -998,12 +1309,7 @@ class App:
         )
 
     def _split_markdown(self, text: str):
-        """Split assistant text into prose / fenced-code segments.
-
-        Returns a list of tuples:
-            ("prose", str)  |  ("code", (language, code_text))
-        Unterminated fences are returned as part of the prose.
-        """
+        """Split assistant text into prose / fenced-code segments."""
         segments: list[tuple[str, object]] = []
         last = 0
         for match in self._CODE_FENCE.finditer(text):
@@ -1093,10 +1399,7 @@ class App:
             padding=8,
             border_radius=12,
             bgcolor=Palette.CARD_LIGHT,
-            border=ft.Border.all(
-                1,
-                "#1F2A3D" if dark else "#E2E8F0",
-            ),
+            border=ft.Border.all(1, "#1F2A3D" if dark else "#E2E8F0"),
         )
 
     def _render_markdown_body(self, text: str) -> list[ft.Control]:
@@ -1405,8 +1708,9 @@ class App:
                   color=Palette.MUTED_LIGHT, expand=True),
             ]
             if d.get("error"):
-                row.append(T(d["error"], size=11, color=Palette.DANGER,
-                             max_lines=1, overflow=ft.TextOverflow.ELLIPSIS))
+                row.append(T(self._safe_message(d["error"]), size=11,
+                             color=Palette.DANGER, max_lines=1,
+                             overflow=ft.TextOverflow.ELLIPSIS))
             channel_rows.append(ft.Row(row, spacing=6))
 
         body = [
@@ -1505,7 +1809,9 @@ class App:
                 f"زمان ثبت نتیجه: {delivery.get('done_at') or '—'}",
             ]
             if delivery.get("error"):
-                details.append(f"خطا: {delivery['error']}")
+                details.append(
+                    f"خطا: {self._safe_message(delivery['error'])}"
+                )
             line = ft.Column([
                 T("\n".join(details), size=12),
                 *(
@@ -1617,20 +1923,17 @@ class App:
         time_field = tf("ساعت (HH:MM)", value="09:00")
 
         async def submit(_):
+            local_time = combine_local(
+                date_field.value or "", time_field.value or "",
+            )
+            if local_time is None or local_time <= dt.datetime.now():
+                self.toast("تاریخ یا ساعت معتبرِ آینده وارد کنید.", error=True)
+                return
             try:
-                local_time = dt.datetime.strptime(
-                    f"{date_field.value or ''} {time_field.value or ''}",
-                    "%Y-%m-%d %H:%M",
-                )
-                if local_time <= dt.datetime.now():
-                    raise ValueError
                 await self.api.post("/removal-reminders", {
                     "delivery_id": delivery["id"],
                     "due_at": to_utc_iso(local_time),
                 })
-            except ValueError:
-                self.toast("تاریخ یا ساعت معتبرِ آینده وارد کنید.", error=True)
-                return
             except ApiError as exc:
                 self.toast(str(exc), error=True)
                 return
@@ -1695,24 +1998,20 @@ class App:
                 time_field = tf("ساعت (HH:MM)", value="09:00")
 
                 async def submit(_):
-                    try:
-                        new_time = dt.datetime.strptime(
-                            f"{date_field.value or ''} "
-                            f"{time_field.value or ''}",
-                            "%Y-%m-%d %H:%M",
-                        )
-                        if new_time <= dt.datetime.now():
-                            raise ValueError
-                        await self.api.post(
-                            f"/removal-reminders/{item['id']}/reschedule",
-                            {"due_at": to_utc_iso(new_time)},
-                        )
-                    except ValueError:
+                    new_time = combine_local(
+                        date_field.value or "", time_field.value or "",
+                    )
+                    if new_time is None or new_time <= dt.datetime.now():
                         self.toast(
                             "تاریخ یا ساعت معتبرِ آینده وارد کنید.",
                             error=True,
                         )
                         return
+                    try:
+                        await self.api.post(
+                            f"/removal-reminders/{item['id']}/reschedule",
+                            {"due_at": to_utc_iso(new_time)},
+                        )
                     except ApiError as exc:
                         self.toast(str(exc), error=True)
                         return
@@ -1778,7 +2077,7 @@ class App:
             item for item in stored if isinstance(item, dict)
             and item.get("role") in ("user", "assistant")
             and isinstance(item.get("text"), str)
-        ][-30:] if isinstance(stored, list) else []
+        ][-config.CHAT_HISTORY_LIMIT:] if isinstance(stored, list) else []
         for item in self.chat_messages:
             if item.get("status") == "waiting":
                 item["status"] = "failed"
@@ -1818,7 +2117,7 @@ class App:
         )
 
         async def persist_history():
-            self.chat_messages = self.chat_messages[-30:]
+            self.chat_messages = self.chat_messages[-config.CHAT_HISTORY_LIMIT:]
             await self.api.storage.set("ai_chat_history", self.chat_messages)
 
         def render_transcript():
@@ -1995,11 +2294,11 @@ class App:
             self.page.update()
             try:
                 recent_context = self.chat_messages[
-                    max(0, user_index - 7):user_index
+                    max(0, user_index - config.CHAT_CONTEXT_MESSAGES):user_index
                 ]
                 contextual_text = "\n".join(
                     f"{'کاربر' if item['role'] == 'user' else 'دستیار'}: "
-                    f"{item['text'][:1500]}"
+                    f"{item['text'][:config.CHAT_CONTEXT_CHAR_LIMIT]}"
                     for item in recent_context
                     if item.get("status") == "ready"
                 )
@@ -2188,6 +2487,95 @@ class App:
             size=12, color=Palette.MUTED_LIGHT,
         )
 
+        # ---- Live preview card (updates as the user types) ----
+        preview_column = ft.Column([], spacing=8, tight=True)
+
+        def _channel_titles_for_preview() -> str:
+            selected_ids = state["selected"] or set()
+            titles = [
+                c["title"] for c in self.channels
+                if c.get("id") in selected_ids
+            ]
+            if not titles:
+                return "پیش‌نمایش کانال"
+            if len(titles) == 1:
+                return titles[0]
+            return titles[0] + f" و {digits(len(titles) - 1)} کانال دیگر"
+
+        def _refresh_preview(_=None):
+            try:
+                preview_column.controls.clear()
+                if not config.FEATURES_LIVE_PREVIEW:
+                    self.page.update()
+                    return
+                title_text = (title.value or "").strip()
+                body_text = (text.value or "").strip()
+                signature_text = (signature.value or "").strip()
+
+                header_title = _channel_titles_for_preview()
+                preview_children: list[ft.Control] = [
+                    ft.Row([
+                        ft.Container(
+                            content=ft.Icon(ft.Icons.CAMPAIGN, size=16,
+                                            color="#FFFFFF"),
+                            width=32, height=32, border_radius=10,
+                            alignment=ft.Alignment(0, 0),
+                            bgcolor=Palette.PRIMARY,
+                        ),
+                        ft.Column([
+                            T(header_title, size=13,
+                              weight=ft.FontWeight.W_600,
+                              color=Palette.TEXT_LIGHT),
+                            T("پیش‌نمایش زنده", size=10,
+                              color=Palette.MUTED_LIGHT),
+                        ], spacing=1, expand=True),
+                    ], spacing=10),
+                    ft.Divider(height=1, color="#EEF2F7"),
+                ]
+
+                if title_text:
+                    preview_children.append(T(
+                        title_text, size=14, weight=ft.FontWeight.BOLD,
+                        color=Palette.TEXT_LIGHT,
+                    ))
+                if body_text:
+                    preview_children.append(T(
+                        body_text, size=13, color=Palette.TEXT_LIGHT,
+                        selectable=False, max_lines=20,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ))
+                else:
+                    preview_children.append(T(
+                        "متن پست اینجا نمایش داده می‌شود…",
+                        size=13, color="#94A3B8", italic=True,
+                    ))
+
+                if media["id"]:
+                    preview_children.append(ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.ATTACH_FILE, size=16,
+                                    color=Palette.PRIMARY),
+                            T(media["name"] or "فایل پیوست",
+                              size=12, color=Palette.PRIMARY,
+                              max_lines=1,
+                              overflow=ft.TextOverflow.ELLIPSIS),
+                        ], spacing=6),
+                        padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+                        border_radius=10,
+                        bgcolor=ft.Colors.with_opacity(0.08, Palette.PRIMARY),
+                    ))
+
+                if signature_text:
+                    preview_children.append(T(
+                        signature_text, size=11,
+                        color=Palette.MUTED_LIGHT, italic=True,
+                    ))
+
+                preview_column.controls.extend(preview_children)
+                self.page.update()
+            except Exception:
+                logger.exception("Live preview refresh failed")
+
         async def pick_media(e=None):
             if not self.api.online:
                 return self.toast(
@@ -2206,11 +2594,16 @@ class App:
             if not selected:
                 return
             file = selected[0]
-            if file.size > 20 * 1024 * 1024:
-                return self.toast("حداکثر اندازه فایل ۲۰ مگابایت است.", error=True)
+            size = getattr(file, "size", 0) or 0
+            if size > config.UPLOAD_MAX_BYTES:
+                return self.toast(
+                    f"حداکثر اندازه فایل "
+                    f"{humanize_bytes(config.UPLOAD_MAX_BYTES)} است.",
+                    error=True,
+                )
             try:
-                file_data = file.bytes
-                if file_data is None and file.path:
+                file_data = getattr(file, "bytes", None)
+                if file_data is None and getattr(file, "path", None):
                     file_data = await asyncio.to_thread(
                         Path(file.path).read_bytes
                     )
@@ -2229,13 +2622,13 @@ class App:
             media["id"] = uploaded.get("id")
             media["name"] = uploaded.get("filename") or file.name
             media_status.value = f"پیوست: {media['name']}"
-            self.page.update()
+            _refresh_preview()
 
         def clear_media(e=None):
             media["id"] = None
             media["name"] = ""
             media_status.value = "فایلی پیوست نشده است."
-            self.page.update()
+            _refresh_preview()
 
         prompt = tf("موضوع یا ایده", hint_text="مثلاً: معرفی اپلیکیشن جدید")
         ai_language = ft.Dropdown(
@@ -2304,7 +2697,7 @@ class App:
                 else:
                     text.value = result
                     self.toast("✓ آماده شد")
-                    self.page.update()
+                    _refresh_preview()
             except ApiError as e:
                 self.toast(str(e), error=True)
             finally:
@@ -2315,12 +2708,10 @@ class App:
                 body = tpl.get("body", "")
                 body = body.replace("{{title}}", (title.value or "").strip())
                 body = body.replace("{{date}}", jdate(dt.datetime.now()))
-                # Placeholders the user still has to fill are dropped so they
-                # are never published literally.
                 body = re.sub(r"\{\{\w+\}\}", "", body)
                 body = re.sub(r"\n{3,}", "\n\n", body).strip()
                 text.value = body
-                self.page.update()
+                _refresh_preview()
             return handler
 
         def pick_channel(ch):
@@ -2329,6 +2720,7 @@ class App:
                     state["selected"].add(ch["id"])
                 else:
                     state["selected"].discard(ch["id"])
+                _refresh_preview()
             return ft.Checkbox(
                 label=ch["title"],
                 value=ch["id"] in state["selected"],
@@ -2346,14 +2738,13 @@ class App:
 
             scheduled_at = None
             if mode == "schedule":
-                try:
-                    local_time = dt.datetime.strptime(
-                        f"{scheduled_date.value or ''} {scheduled_time.value or ''}",
-                        "%Y-%m-%d %H:%M",
-                    )
-                except ValueError:
+                local_time = combine_local(
+                    scheduled_date.value or "",
+                    scheduled_time.value or "",
+                )
+                if local_time is None:
                     return self.toast(
-                        "تاریخ را به شکل YYYY-MM-DD و ساعت را به شکل HH:MM وارد کنید",
+                        "تاریخ را YYYY-MM-DD و ساعت را HH:MM وارد کنید.",
                         error=True,
                     )
                 if local_time <= dt.datetime.now():
@@ -2494,6 +2885,27 @@ class App:
                 text,
             ]
 
+        # Register live preview refreshers after everything is defined.
+        title.on_change = _refresh_preview
+        text.on_change = _refresh_preview
+        signature.on_change = _refresh_preview
+        _refresh_preview()
+
+        preview_section = []
+        if config.FEATURES_LIVE_PREVIEW:
+            preview_section = [
+                surface_card(
+                    T("پیش‌نمایش پست", size=15,
+                      weight=ft.FontWeight.BOLD,
+                      color=Palette.TEXT_LIGHT),
+                    T("هم‌زمان با نوشتن، شکل نهایی در کانال را ببین.",
+                      size=11, color=Palette.MUTED_LIGHT),
+                    ft.Container(height=4),
+                    preview_column,
+                ),
+                ft.Container(height=12),
+            ]
+
         form = ft.Column([
             # --- AI section ---
             surface_card(
@@ -2530,6 +2942,8 @@ class App:
             surface_card(*content_card),
 
             ft.Container(height=12),
+
+            *preview_section,
 
             # --- schedule ---
             surface_card(
@@ -2617,12 +3031,14 @@ class App:
                   color=Palette.TEXT_LIGHT),
                 ft.Switch(
                     label="ارسال بی‌صدا",
+                    value=state["silent"],
                     active_color=Palette.PRIMARY,
                     on_change=lambda e: state.__setitem__(
                         "silent", bool(e.control.value)),
                 ),
                 ft.Switch(
                     label="پین کردن پس از ارسال",
+                    value=state["pin"],
                     active_color=Palette.PRIMARY,
                     on_change=lambda e: state.__setitem__(
                         "pin", bool(e.control.value)),
@@ -2694,6 +3110,9 @@ class App:
     async def v_settings(self):
         self.channels = await self._safe_get("/channels", self.channels)
         channel_count = len(self.channels)
+        profile = await self.api.get_profile()
+
+        profile_card = self._profile_card(profile)
 
         return ft.Container(
             content=ft.Column([
@@ -2703,41 +3122,19 @@ class App:
                 ),
                 ft.Container(height=24),
 
-                # profile card
-                ft.Container(
-                    content=surface_card(
-                        ft.Row([
-                            ft.Container(
-                                content=T("م", size=20, color="#FFFFFF",
-                                          weight=ft.FontWeight.BOLD),
-                                width=56, height=56, border_radius=18,
-                                alignment=ft.Alignment(0, 0),
-                                gradient=ft.LinearGradient(
-                                    colors=[Palette.ACCENT, Palette.PRIMARY]),
-                            ),
-                            ft.Column([
-                                T(
-                                    (self.me or {}).get("name")
-                                    or (self.me or {}).get("username")
-                                    or "حساب کاربری",
-                                    size=16,
-                                  weight=ft.FontWeight.BOLD,
-                                  color=Palette.TEXT_LIGHT),
-                                T(
-                                    "حساب متصل به سرور"
-                                    if self.api.online and self.me
-                                    else "حالت محلی — ورود به سرور در دسترس نیست",
-                                  size=12, color=Palette.MUTED_LIGHT),
-                            ], spacing=2, expand=True),
-                        ], spacing=14),
-                    ),
-                    padding=ft.Padding.symmetric(horizontal=16),
-                ),
+                profile_card,
                 ft.Container(height=16),
 
                 # menu items
                 ft.Container(
                     content=surface_card(
+                        self._menu_row(ft.Icons.PERSON_OUTLINE,
+                                       "ویرایش پروفایل",
+                                       "نام، نام کاربری و عکس پروفایل",
+                                       lambda e: self.spawn(
+                                           self._profile_dialog()),
+                                       disabled=not config.FEATURES_LOCAL_PROFILE),
+                        ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.CAMPAIGN_OUTLINED, "کانال‌های من",
                                        f"{digits(channel_count)} کانال",
                                        lambda e: self.spawn(self._channels_sheet())),
@@ -2780,7 +3177,8 @@ class App:
                         self._menu_row(ft.Icons.SYSTEM_UPDATE_ALT,
                                        "بررسی به‌روزرسانی",
                                        "نسخه پایدار منتشرشده در GitHub",
-                                       lambda e: self.spawn(self.go("updates"))),
+                                       lambda e: self.spawn(self.go("updates")),
+                                       disabled=not config.FEATURES_UPDATE_CHECK),
                         ft.Divider(height=1, color="#F1F5F9"),
                         self._menu_row(ft.Icons.FORMAT_QUOTE,
                                        "امضای پیش‌فرض پست",
@@ -2817,6 +3215,69 @@ class App:
             expand=True,
         )
 
+    def _profile_card(self, profile: dict):
+        """Return the clickable profile card shown at the top of settings."""
+        local_name = (profile or {}).get("name") or ""
+        username = (profile or {}).get("username") or ""
+        avatar_b64 = (profile or {}).get("avatar_b64") or ""
+
+        display_name = (
+            local_name
+            or (self.me or {}).get("name")
+            or (self.me or {}).get("username")
+            or "کاربر"
+        )
+        if username:
+            subtitle = f"@{username}"
+        elif self.api.online and self.me:
+            subtitle = "حساب متصل به سرور"
+        else:
+            subtitle = "حالت محلی — اطلاعات فقط روی این دستگاه"
+
+        if avatar_b64:
+            avatar = ft.Container(
+                content=ft.Image(
+                    src_base64=avatar_b64,
+                    fit=ft.BoxFit.COVER,
+                    width=56, height=56,
+                ),
+                width=56, height=56, border_radius=18,
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            )
+        else:
+            initial = (display_name.strip()[:1] or "؟")
+            avatar = ft.Container(
+                content=T(initial, size=20, color="#FFFFFF",
+                          weight=ft.FontWeight.BOLD),
+                width=56, height=56, border_radius=18,
+                alignment=ft.Alignment(0, 0),
+                gradient=ft.LinearGradient(
+                    colors=[Palette.ACCENT, Palette.PRIMARY]),
+            )
+
+        async def open_edit(e=None):
+            await self._profile_dialog()
+
+        return ft.Container(
+            content=surface_card(
+                ft.Row([
+                    avatar,
+                    ft.Column([
+                        T(display_name, size=16, weight=ft.FontWeight.BOLD,
+                          color=Palette.TEXT_LIGHT),
+                        T(subtitle, size=12, color=Palette.MUTED_LIGHT),
+                    ], spacing=2, expand=True),
+                    ft.Icon(ft.Icons.EDIT_OUTLINED,
+                            color=Palette.MUTED_LIGHT, size=20),
+                ], spacing=14),
+            ),
+            padding=ft.Padding.symmetric(horizontal=16),
+            on_click=(
+                lambda e: self.spawn(open_edit())
+                if config.FEATURES_LOCAL_PROFILE else None
+            ),
+        )
+
     def _menu_row(self, icon, title, subtitle, on_click, disabled=False):
         return ft.Container(
             content=ft.Row([
@@ -2838,6 +3299,179 @@ class App:
             on_click=None if disabled else on_click,
             opacity=0.5 if disabled else 1,
         )
+
+    # ----------------------------------------------------- profile dialog --
+    async def _profile_dialog(self):
+        if not config.FEATURES_LOCAL_PROFILE:
+            self.toast("ویرایش پروفایل در این نسخه فعال نیست.", error=True)
+            return
+        profile = await self.api.get_profile()
+        name_field = tf("نام نمایشی",
+                        value=profile.get("name", ""),
+                        hint_text="اختیاری")
+        username_field = tf("نام کاربری",
+                            value=profile.get("username", ""),
+                            hint_text="اختیاری")
+        avatar_state = {
+            "b64": profile.get("avatar_b64", ""),
+            "mime": profile.get("avatar_mime", ""),
+        }
+
+        avatar_preview = ft.Container(
+            content=(
+                ft.Image(src_base64=avatar_state["b64"],
+                         fit=ft.BoxFit.COVER, width=72, height=72)
+                if avatar_state["b64"] else
+                ft.Icon(ft.Icons.PERSON_OUTLINE, size=32,
+                        color=Palette.MUTED_LIGHT)
+            ),
+            width=72, height=72, border_radius=22,
+            alignment=ft.Alignment(0, 0),
+            bgcolor=ft.Colors.with_opacity(0.10, Palette.PRIMARY),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+        )
+
+        async def pick_avatar(e=None):
+            try:
+                files = await self.file_picker.pick_files(
+                    dialog_title="انتخاب عکس پروفایل",
+                    allow_multiple=False,
+                    with_data=True,
+                )
+            except (RuntimeError, OSError) as exc:
+                return self.toast(f"انتخاب تصویر ناموفق بود: {exc}", error=True)
+            if not files:
+                return
+            file = files[0]
+            size = getattr(file, "size", 0) or 0
+            if size and size < config.PROFILE_AVATAR_MIN_BYTES:
+                return self.toast("فایل تصویر بسیار کوچک است.", error=True)
+            if size and size > config.PROFILE_AVATAR_MAX_BYTES:
+                return self.toast(
+                    f"حداکثر اندازه تصویر "
+                    f"{humanize_bytes(config.PROFILE_AVATAR_MAX_BYTES)} است.",
+                    error=True,
+                )
+            mime = mimetypes.guess_type(file.name)[0] or ""
+            if mime not in config.PROFILE_AVATAR_MIME_TYPES:
+                return self.toast(
+                    "فقط تصویر JPG، PNG یا WebP پذیرفته می‌شود.",
+                    error=True,
+                )
+            try:
+                data = getattr(file, "bytes", None)
+                if data is None and getattr(file, "path", None):
+                    data = await asyncio.to_thread(
+                        Path(file.path).read_bytes
+                    )
+                if not isinstance(data, bytes):
+                    raise OSError("محتوای تصویر در دسترس نیست.")
+            except OSError as exc:
+                return self.toast(f"خواندن تصویر ناموفق بود: {exc}", error=True)
+            avatar_state["b64"] = base64.b64encode(data).decode("ascii")
+            avatar_state["mime"] = mime
+            avatar_preview.content = ft.Image(
+                src_base64=avatar_state["b64"],
+                fit=ft.BoxFit.COVER, width=72, height=72,
+            )
+            self.page.update()
+
+        def clear_avatar(e=None):
+            avatar_state["b64"] = ""
+            avatar_state["mime"] = ""
+            avatar_preview.content = ft.Icon(
+                ft.Icons.PERSON_OUTLINE, size=32,
+                color=Palette.MUTED_LIGHT,
+            )
+            self.page.update()
+
+        async def save(e=None):
+            name = (name_field.value or "").strip()
+            username = (username_field.value or "").strip()
+            if username and not is_valid_username(
+                username,
+                min_len=config.PROFILE_USERNAME_MIN,
+                max_len=config.PROFILE_USERNAME_MAX,
+                allowed_chars=config.PROFILE_USERNAME_ALLOWED_CHARS,
+            ):
+                return self.toast(
+                    "نام کاربری باید ۳ تا ۳۲ نویسه و بدون فاصله باشد.",
+                    error=True,
+                )
+            try:
+                await self.api.save_profile(
+                    name=name,
+                    username=username,
+                    avatar_b64=avatar_state["b64"],
+                    avatar_mime=avatar_state["mime"],
+                )
+            except ApiError as exc:
+                return self.toast(str(exc), error=True)
+            self.page.pop_dialog()
+            self.toast("پروفایل ذخیره شد.")
+            if self.view == "settings":
+                await self.go("settings")
+
+        async def remove_profile(e=None):
+            if not await self.confirm(
+                "همه اطلاعات پروفایل از این دستگاه حذف شود؟"
+            ):
+                return
+            try:
+                await self.api.clear_profile()
+            except ApiError as exc:
+                return self.toast(str(exc), error=True)
+            self.page.pop_dialog()
+            self.toast("پروفایل حذف شد.")
+            if self.view == "settings":
+                await self.go("settings")
+
+        self.page.show_dialog(ft.AlertDialog(
+            title=T("پروفایل من", weight=ft.FontWeight.BOLD),
+            content=ft.Container(
+                content=ft.Column([
+                    ft.Row([
+                        avatar_preview,
+                        ft.Column([
+                            ft.Row([
+                                ft.TextButton(
+                                    "تغییر عکس",
+                                    icon=ft.Icons.UPLOAD,
+                                    on_click=lambda e: self.spawn(pick_avatar()),
+                                ),
+                                ft.TextButton(
+                                    "حذف عکس",
+                                    icon=ft.Icons.DELETE_OUTLINE,
+                                    on_click=clear_avatar,
+                                ),
+                            ], spacing=4),
+                            T("این تصویر فقط روی دستگاه ذخیره می‌شود.",
+                              size=11, color=Palette.MUTED_LIGHT),
+                        ], spacing=4, expand=True),
+                    ], spacing=14),
+                    name_field,
+                    username_field,
+                    T("همه اطلاعات پروفایل اختیاری است و هرگز به سرور "
+                      "ارسال نمی‌شود.",
+                      size=11, color=Palette.MUTED_LIGHT),
+                ], tight=True, spacing=12, scroll=ft.ScrollMode.AUTO),
+                width=360,
+            ),
+            actions=[
+                ft.TextButton(
+                    "حذف پروفایل",
+                    on_click=lambda e: self.spawn(remove_profile()),
+                ),
+                ft.TextButton(
+                    "لغو",
+                    on_click=lambda e: self.page.pop_dialog(),
+                ),
+                ft.FilledButton(
+                    "ذخیره",
+                    on_click=lambda e: self.spawn(save()),
+                ),
+            ],
+        ))
 
     async def _legacy_ai_settings(self):
         if self.api.online:
@@ -3008,8 +3642,9 @@ class App:
                         ft.TextButton(
                             "دریافت کلید از وب‌سایت رسمی",
                             icon=ft.Icons.OPEN_IN_NEW,
-                            on_click=lambda e: self._open_ai_provider(
-                                provider.value),
+                            on_click=lambda e: self.spawn(
+                                self._open_ai_provider(provider.value)
+                            ),
                         ),
                     ], spacing=12)),
                     padding=16,
@@ -3018,14 +3653,14 @@ class App:
             expand=True,
         )
 
-    def _open_ai_provider(self, provider):
+    async def _open_ai_provider(self, provider):
         urls = {
             "groq": "https://console.groq.com/keys",
             "openai": "https://platform.openai.com/api-keys",
             "gemini": "https://aistudio.google.com/app/apikey",
             "anthropic": "https://console.anthropic.com/settings/keys",
         }
-        self.page.launch_url(urls.get(provider, urls["groq"]))
+        await self._open_external(urls.get(provider, urls["groq"]))
 
     async def v_ai_settings(self):
         def open_assistant(_event):
@@ -3099,8 +3734,9 @@ class App:
                         ft.TextButton(
                             "باز کردن ایتایار",
                             icon=ft.Icons.OPEN_IN_NEW,
-                            on_click=lambda e: self.page.launch_url(
-                                "https://eitaayar.ir/"),
+                            on_click=lambda e: self.spawn(
+                                self._open_external("https://eitaayar.ir/")
+                            ),
                         ),
                         T("۲. افزودن کانال", size=16,
                           weight=ft.FontWeight.BOLD),
@@ -3759,8 +4395,9 @@ class App:
                 T("مدیریت محتوای کانال‌های ایتا با ابزارهای انتشار و AI.",
                   size=12, color=Palette.MUTED_LIGHT,
                   text_align=ft.TextAlign.CENTER),
-                T("تغییرات این نسخه: تاریخچه و خروجی، نسخه‌های قبلی، "
-                  "پیگیری بازخورد، تنظیم ظاهر و ابزارهای تولید محتوا.",
+                T("تغییرات این نسخه: نمایش Markdown در دستیار، پروفایل "
+                  "اختیاری، پیش‌نمایش زنده پست، اعلان‌های سراسری و "
+                  "بارگذاری اسکلتی.",
                   size=11, color=Palette.MUTED_LIGHT,
                   text_align=ft.TextAlign.CENTER),
                 ft.TextButton(
