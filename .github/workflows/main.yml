@@ -115,69 +115,17 @@ jobs:
                  build/ 2>/dev/null || true
 
       # ------------------------------------------------------------------
-      # NEW: dynamic versionCode
+      # NEW (optional): release signing
       #
-      # Bumps the local version segment in pyproject.toml to X.Y.Z+<run>,
-      # so every build produces a unique versionCode. Without this, Android
-      # rejects installing a new APK over a previously installed one.
-      #
-      # The step is written to be a no-op on any unexpected condition:
-      #   * missing pyproject.toml         → skip
-      #   * no `version = "X.Y.Z"` line    → skip
-      #   * write error                    → skip
-      # so the workflow always reaches `flet build apk` with a valid file.
-      # ------------------------------------------------------------------
-      - name: Set dynamic versionCode in pyproject.toml
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os, pathlib, re, sys
-
-          path = pathlib.Path("pyproject.toml")
-          if not path.exists():
-              print("::warning::pyproject.toml not found; skipping version bump.")
-              sys.exit(0)
-
-          src = path.read_text(encoding="utf-8")
-          run_number = (os.environ.get("GITHUB_RUN_NUMBER") or "1").strip() or "1"
-
-          pattern = re.compile(
-              r'(?m)^(version\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(?:\+[0-9]+)?(")'
-          )
-
-          def repl(match):
-              return f"{match.group(1)}{match.group(2)}+{run_number}{match.group(3)}"
-
-          new_src, count = pattern.subn(repl, src, count=1)
-          if count == 0:
-              print("::warning::No version line matched; leaving pyproject.toml untouched.")
-              sys.exit(0)
-
-          try:
-              path.write_text(new_src, encoding="utf-8")
-          except OSError as exc:
-              print(f"::warning::Could not write pyproject.toml ({exc}); leaving unchanged.")
-              sys.exit(0)
-
-          print(f"::notice::pyproject version set for build number {run_number}")
-          PY
-
-      - name: Show resolved version line
-        shell: bash
-        run: grep -E '^version[[:space:]]*=' pyproject.toml || true
-
-      # ------------------------------------------------------------------
-      # NEW: optional release signing
-      #
-      # Activates only when the repository secrets below are configured:
+      # Activates ONLY when the repository secret below is configured:
       #   * ANDROID_KEYSTORE_BASE64     (base64 of release.jks)
       #   * ANDROID_KEYSTORE_PASSWORD   (keystore password)
       #   * ANDROID_KEY_PASSWORD        (key password)
       #   * ANDROID_KEY_ALIAS           (key alias)
       #
       # When the secret is missing, this step is skipped entirely and the
-      # workflow uses exactly the same command as before, so the working
-      # build path is unchanged.
+      # workflow falls back to the exact same build command as before —
+      # so the working build path is never altered by its absence.
       # ------------------------------------------------------------------
       - name: Setup release signing (optional)
         if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -206,27 +154,42 @@ jobs:
       # ------------------------------------------------------------------
       # Build
       #
-      # When signing is not configured, this runs the exact same command
-      # as before: `flet build apk --verbose`.
-      # When signing is configured, the standard Flet signing flags are
-      # appended. The flags are passed via a bash array so the empty case
-      # produces no extra arguments at all.
+      # pyproject.toml is NOT modified by CI. Instead:
+      #   * versionCode  is set via the standard Flet flag --build-number
+      #   * versionName  comes straight from pyproject.toml (2.1.0)
+      #
+      # Both --build-number and the optional signing flags are passed via
+      # a bash array. An empty array expands to zero arguments, so when
+      # nothing extra is needed the command is byte-for-byte identical
+      # to the original `flet build apk --verbose`.
+      #
+      # If a given Flet build does not support --build-number, the build
+      # stops immediately with a clear error and the flag can be removed
+      # without any other change — the rest of the pipeline is untouched.
       # ------------------------------------------------------------------
       - name: Build APK with Flet
         shell: bash
         run: |
           set -uo pipefail
           mkdir -p build_logs
-          SIGN_ARGS=()
+
+          EXTRA_ARGS=()
+
+          # Unique versionCode per build so Android accepts in-place upgrades.
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
+          EXTRA_ARGS+=(--build-number "$BUILD_NUMBER")
+
           if [[ -n "${FLET_ANDROID_SIGNING_KEY_STORE:-}" ]]; then
-            SIGN_ARGS+=(
+            EXTRA_ARGS+=(
               --android-signing-key-store "$FLET_ANDROID_SIGNING_KEY_STORE"
               --android-signing-key-store-password "$FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD"
               --android-signing-key-password "$FLET_ANDROID_SIGNING_KEY_PASSWORD"
               --android-signing-key-alias "$FLET_ANDROID_SIGNING_KEY_ALIAS"
             )
           fi
-          flet build apk "${SIGN_ARGS[@]}" --verbose 2>&1 | tee build_logs/flet-build.log
+
+          echo "flet build apk ${EXTRA_ARGS[*]} --verbose"
+          flet build apk "${EXTRA_ARGS[@]}" --verbose 2>&1 | tee build_logs/flet-build.log
 
       - name: Show end of build log
         if: failure()
