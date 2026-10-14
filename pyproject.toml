@@ -1,1 +1,61 @@
-PLACEHOLDER
+# =====================================================================
+# Eitaa Manager — project metadata
+#
+# This file is consumed by:
+#   * `flet build apk`      — to produce the Android package
+#   * `pip install -e .`    — for desktop / dev setups
+#   * GitHub Actions CI     — to resolve the Flet version and cache keys
+#
+# Do NOT change the fields below without verifying an actual APK build:
+#   name             → internal package name
+#   version          → versionName in the APK (versionCode comes from CI)
+#   [tool.flet]      → product/org become the Android application id
+#   [tool.flet.app]  → path points to the Flet entry point (src/main.py)
+#
+# Changing `org` or `product` also changes the app's identity on Android
+# and will break in-place upgrades of already-installed APKs.
+# =====================================================================
+
+[project]
+name = "eitaa-manager"
+version = "2.2.0"
+description = "مدیریت هوشمند کانال‌های ایتا"
+requires-python = ">=3.12,<3.13"
+
+# Runtime dependencies of the Flet client only.
+# Backend-only packages (FastAPI, SQLAlchemy, cryptography, uvicorn, …)
+# stay in `backend/requirements.txt` and are never bundled into the APK.
+dependencies = [
+    "flet",
+    "httpx",
+]
+
+# ---------------------------------------------------------------------
+# Project links (PEP 621). No effect on the Android build; shown by
+# packaging tools and IDEs.
+# ---------------------------------------------------------------------
+[project.urls]
+Homepage = "https://github.com/Abolfazlsoltan/eitaa_app"
+Source = "https://github.com/Abolfazlsoltan/eitaa_app"
+Issues = "https://github.com/Abolfazlsoltan/eitaa_app/issues"
+
+# ---------------------------------------------------------------------
+# Flet build configuration.
+#
+# `org` + `product` are combined by Flet into the Android application id:
+#     app.eitaamanager + ایتا منیجر → app.eitaamanager.eitaa_manager
+# Keep both values stable across releases.
+# ---------------------------------------------------------------------
+[tool.flet]
+product = "ایتا منیجر"
+org = "app.eitaamanager"
+
+# ---------------------------------------------------------------------
+# Flet app layout.
+#
+# `path = "src"` tells Flet to use `src/main.py` as the entry point and
+# to include only `src/` in the packaged app. The `backend/` package is
+# intentionally outside this directory so it is never shipped in the APK.
+# ---------------------------------------------------------------------
+[tool.flet.app]
+path = "src"
