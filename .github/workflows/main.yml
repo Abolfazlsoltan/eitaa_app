@@ -23,6 +23,12 @@ jobs:
     name: Run automated tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Disposable test-only key; never use this value for a real deployment.
+      APP_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      DATABASE_URL: "sqlite:///./test-ci.db"
+      AI_API_KEY: "ci-test-key"
+      AI_PROVIDER: "groq"
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
