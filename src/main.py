@@ -2109,7 +2109,10 @@ class App:
                     await self.api.put(f"/posts/{post_id}", payload)
                 else:
                     await self.api.post("/posts", payload)
-                self.toast("زمان‌بندی شد")
+                self.toast(
+                    "زمان‌بندی شد" if self.api.online else
+                    "زمان‌بندی ثبت شد؛ برای اجرای خودکار، برنامه باید باز بماند."
+                )
                 await self.go("posts", "scheduled")
             except ApiError as e:
                 self.toast(str(e), error=True)
