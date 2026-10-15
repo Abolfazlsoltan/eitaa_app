@@ -1204,8 +1204,21 @@ class Api:
         mode = body.get("mode", "draft")
         if mode not in ("draft", "now", "schedule"):
             raise ApiError("حالت انتشار نامعتبر است.")
+        scheduled_at = None
         if mode == "schedule":
-            raise ApiError("برای زمان‌بندی انتشار به اتصال سرور نیاز دارید.")
+            raw_scheduled_at = body.get("scheduled_at")
+            if not isinstance(raw_scheduled_at, str) or not raw_scheduled_at.strip():
+                raise ApiError("تاریخ و ساعت انتشار را مشخص کنید.")
+            try:
+                scheduled_at = dt.datetime.fromisoformat(raw_scheduled_at.strip().replace("Z", "+00:00"))
+                if scheduled_at.tzinfo is not None:
+                    scheduled_at = scheduled_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            except ValueError as exc:
+                raise ApiError("تاریخ و ساعت انتشار معتبر نیست.") from exc
+            if scheduled_at <= _utcnow_naive():
+                raise ApiError("زمان انتشار باید در آینده باشد.")
+            if scheduled_at > _utcnow_naive() + dt.timedelta(days=30):
+                raise ApiError("زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
         posts = await self._load("posts", [])
         post = next((p for p in posts if p.get("id") == post_id), None)
         if post is None:
