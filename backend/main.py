@@ -368,22 +368,22 @@ class AutoIn(BaseModel):
 
 
 class RegIn(BaseModel):
-    username: str
-    password: str
-    display_name: str = ""
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=8, max_length=1024)
+    display_name: str = Field(default="", max_length=100)
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class MemberIn(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=8, max_length=1024)
     role: str = "editor"
-    display_name: str = ""
-    eitaa_id: str | None = None
+    display_name: str = Field(default="", max_length=100)
+    eitaa_id: str | None = Field(default=None, max_length=40)
 
 
 # ============================================================= connections
@@ -1410,6 +1410,8 @@ def _user(u: User) -> dict:
 def _check_pw(pw: str) -> None:
     if len(pw) < 8:
         raise HTTPException(400, "رمز عبور باید حداقل ۸ نویسه باشد.")
+    if len(pw) > 1024:
+        raise HTTPException(400, "رمز عبور بیش از حد طولانی است.")
 
 
 @app.get("/api/auth/state")
