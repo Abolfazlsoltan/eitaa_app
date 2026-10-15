@@ -12,7 +12,9 @@ _key = os.getenv("APP_SECRET_KEY")
 if not _key:
     raise RuntimeError("APP_SECRET_KEY is required (see .env.example)")
 fernet = Fernet(_key.encode())
-now = lambda: dt.datetime.utcnow()
+def now():
+    # Keep SQLite's existing naive-UTC schema while avoiding deprecated utcnow().
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 class Base(DeclarativeBase): pass
 
