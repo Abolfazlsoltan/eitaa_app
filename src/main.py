@@ -1681,6 +1681,12 @@ class App:
                 title or "تاریخچه",
                 actions=[
                     self._header_icon(
+                        ft.Icons.OPEN_IN_NEW,
+                        on_click=lambda e: self._open_external(
+                            "https://eitaa.com/" + str(channel.get("chat_id"))
+                        ) if channel and channel.get("chat_id") else None,
+                    ),
+                    self._header_icon(
                         ft.Icons.ARROW_FORWARD,
                         on_click=lambda e: self.spawn(self.go("posts")),
                     ),
