@@ -164,5 +164,31 @@ class ApiAIDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(usage), 1)
 
 
+class ApiAIInputValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.api = Api(object())
+        self.api._ai_client.complete = AsyncMock(return_value="unused")
+
+    async def test_rejects_unknown_action_before_calling_provider(self):
+        with self.assertRaises(ApiError):
+            await self.api.ai("not-an-action", "متن")
+        self.api._ai_client.complete.assert_not_awaited()
+
+    async def test_rejects_empty_request_before_calling_provider(self):
+        with self.assertRaises(ApiError):
+            await self.api.ai("rewrite", "  ", prompt="  ")
+        self.api._ai_client.complete.assert_not_awaited()
+
+    async def test_rejects_oversized_request_before_calling_provider(self):
+        with self.assertRaises(ApiError):
+            await self.api.ai("rewrite", "x" * 20_001)
+        self.api._ai_client.complete.assert_not_awaited()
+
+    async def test_rejects_unsupported_tone_before_calling_provider(self):
+        with self.assertRaises(ApiError):
+            await self.api.ai("rewrite", "متن", tone="unknown")
+        self.api._ai_client.complete.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
