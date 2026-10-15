@@ -918,7 +918,7 @@ class App:
                         "token": bot_token.value.strip(),
                     })
                 await self.api.post("/channels", {
-                    "channel_id": cid.value.strip(),
+                    "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
                 })
             except ApiError as err:
@@ -2757,7 +2757,7 @@ class App:
                 return self.toast("شناسه کانال لازم است", error=True)
             try:
                 await self.api.post("/channels", {
-                    "channel_id": cid.value.strip(),
+                    "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
                 })
                 self.toast("کانال اضافه شد")
