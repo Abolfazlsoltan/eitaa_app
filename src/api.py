@@ -1042,7 +1042,7 @@ class Api:
         if not connections or not connections[0].get("verified"):
             await self._connect_eitaa({})
 
-        cid = normalize_channel(body.get("value") or "")
+        cid = normalize_channel(body.get("value") or body.get("channel_id") or "")
         if not cid:
             raise ApiError("شناسه کانال معتبر نیست.")
 
