@@ -303,6 +303,18 @@ class App:
     def spawn(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
+    async def _local_schedule_loop(self):
+        # Local scheduling is foreground-only; a configured backend has its
+        # own persistent worker and does not use this loop.
+        while True:
+            await asyncio.sleep(15)
+            if self.api.online:
+                continue
+            try:
+                await self.api.process_due_scheduled()
+            except Exception:
+                logger.exception("Local scheduled-post worker failed")
+
     def _safe_message(self, message) -> str:
         """Return a message that is safe to show in the UI.
 
