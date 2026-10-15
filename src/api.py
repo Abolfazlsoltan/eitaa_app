@@ -1267,7 +1267,7 @@ class Api:
         known_channels = {c.get("id") for c in channels}
         if any(cid not in known_channels for cid in channel_ids):
             raise ApiError("یکی از کانال‌های انتخاب‌شده پیدا نشد.")
-        if mode == "now" and not channel_ids:
+        if mode != "draft" and not channel_ids:
             raise ApiError("حداقل یک کانال انتخاب کنید.")
         revisions = post.setdefault("revisions", [])
         if any(
