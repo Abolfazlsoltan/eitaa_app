@@ -324,7 +324,7 @@ class App:
         return clean
 
     def toast(self, msg: str, error: bool = False):
-        text = self._safe_message(msg) if error else str(msg)
+        text = self._safe_message(msg) if error else str(msg)[:220]
         color = Palette.DANGER if error else None
         self.page.show_dialog(
             ft.SnackBar(
