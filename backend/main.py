@@ -331,7 +331,7 @@ class RemovalReminderTimeIn(BaseModel):
 
 
 class AIIn(BaseModel):
-    action: str = Field(min_length=1, max_length=40)
+    action: str = Field(min_length=1, max_length=30)
     text: str = Field(default="", max_length=20_000)
     prompt: str = Field(default="", max_length=4_000)
     language: Literal["fa", "en", "ar"] = "fa"
@@ -1034,6 +1034,8 @@ def activity():
 
 @app.post("/api/ai")
 async def run_ai(b: AIIn):
+    if b.action not in ai.ACTIONS:
+        raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
     if len(b.text) + len(b.prompt) > 20_000:
         raise HTTPException(413, "متن درخواست بیش از حد طولانی است.")
     instruction = b.prompt.strip() or ai.ACTIONS.get(b.action)
