@@ -3037,6 +3037,8 @@ async def main(page: ft.Page):
     page.services.append(prefs)
 
     app = App(page, loop, prefs)
+    if not app.api.online:
+        asyncio.create_task(app._local_schedule_loop())
     page.services.append(app.file_picker)
     page.services.append(app.url_launcher)
     page.on_platform_brightness_change = lambda e: (
