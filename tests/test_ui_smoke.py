@@ -81,6 +81,24 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_back_navigation_returns_to_the_previous_logical_screen(self):
+        async def run():
+            self.app.view = "new"
+            with patch.object(self.app, "go", new=AsyncMock()) as go:
+                await self.app.handle_back()
+                go.assert_awaited_once_with("posts")
+
+            self.app.view = "auth"
+            with (
+                patch.object(self.app, "go", new=AsyncMock()) as go,
+                patch.object(self.app, "toast") as toast,
+            ):
+                await self.app.handle_back()
+                go.assert_not_awaited()
+                toast.assert_called_once()
+
+        self.loop.run_until_complete(run())
+
     def test_navigation_replaces_templates_with_ai_chat(self):
         from main import NAV_VIEWS
 
