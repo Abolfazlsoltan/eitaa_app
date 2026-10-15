@@ -2784,10 +2784,15 @@ class App:
             if not (cid.value or "").strip():
                 return self.toast("شناسه کانال لازم است", error=True)
             try:
-                await self.api.post("/channels", {
+                existing = await self.api.get("/connections")
+                connection = existing[0] if existing else None
+                payload = {
                     "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
-                })
+                }
+                if isinstance(connection, dict) and connection.get("id") is not None:
+                    payload["connection_id"] = connection["id"]
+                await self.api.post("/channels", payload)
                 self.toast("کانال اضافه شد")
                 self.page.pop_dialog()
                 self.channels = await self._safe_get("/channels", [])
