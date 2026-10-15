@@ -91,7 +91,7 @@ class AIRequestHardeningTests(unittest.IsolatedAsyncioTestCase):
             patch("backend.ai.httpx.AsyncClient") as client,
         ):
             provider = GroqProvider()
-            with self.assertRaisesRegex(AIError, "HTTPS"):
+            with self.assertRaisesRegex(AIError, "امن یا معتبر"):
                 await provider.complete("system", "user")
             client.assert_not_called()
 
