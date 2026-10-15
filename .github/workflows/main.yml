@@ -48,7 +48,8 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   build-apk:
-    if: github.event_name != 'pull_request'
+    # Build on pull requests too, so a green PR proves the Android package
+    # can be produced; the artifact is useful for validation, not a release.
     needs: test
     name: Build Android APK
     runs-on: ubuntu-latest
