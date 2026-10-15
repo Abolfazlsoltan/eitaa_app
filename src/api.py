@@ -275,6 +275,27 @@ class Api:
         self, action: str, text: str, prompt: str = "",
         language: str = "fa", tone: str = "neutral", length: str = "medium",
     ) -> str:
+        # Validate and bound data before it leaves the device.
+        action = action.strip() if isinstance(action, str) else ""
+        text = text.strip() if isinstance(text, str) else ""
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+        language = language.strip() if isinstance(language, str) else "fa"
+        tone = tone.strip() if isinstance(tone, str) else "neutral"
+        length = length.strip() if isinstance(length, str) else "medium"
+
+        if action not in _AI_ACTIONS:
+            raise ApiError("نوع درخواست دستیار هوشمند معتبر نیست.")
+        if not text and not prompt:
+            raise ApiError("ابتدا متن یا توضیح درخواست را وارد کنید.")
+        if len(text) + len(prompt) > 20_000:
+            raise ApiError("متن درخواست خیلی طولانی است؛ آن را کوتاه‌تر کنید.")
+        if language not in ("fa", "en", "ar"):
+            raise ApiError("زبان خروجی پشتیبانی نمی‌شود.")
+        if tone not in ("neutral", "formal", "casual", "friendly", "professional"):
+            raise ApiError("لحن انتخاب‌شده معتبر نیست.")
+        if length not in ("short", "medium", "long"):
+            raise ApiError("اندازهٔ پاسخ انتخاب‌شده معتبر نیست.")
+
         result = await self._anonymous_ai(
             {
                 "action": action,
@@ -285,7 +306,10 @@ class Api:
                 "length": length,
             }
         )
-        return str(result["text"])
+        output = result.get("text") if isinstance(result, dict) else None
+        if not isinstance(output, str) or not output.strip():
+            raise ApiError("دستیار هوشمند پاسخ معتبری برنگرداند.")
+        return output.strip()
 
     async def ai_settings(self) -> dict:
         provider = await self.storage.get("ai_provider") or "groq"
