@@ -287,6 +287,7 @@ class App:
         self.me: dict = {"name": "محلی", "role": "local"}
         self.channels: list = []
         self.view = "home"
+        self._last_primary_view = "home"
         self.theme_mode = "light"
         self.accent_name = "آبی"
         self.chat_messages: list[dict] = []
