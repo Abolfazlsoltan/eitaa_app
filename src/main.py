@@ -2054,7 +2054,7 @@ class App:
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
-                "status": "queued",
+                "mode": "now",
                 "channel_ids": list(state["selected"]),
             }
             try:
@@ -2086,7 +2086,7 @@ class App:
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
-                "status": "scheduled",
+                "mode": "schedule",
                 "channel_ids": list(state["selected"]),
                 "scheduled_at": to_utc_iso(when),
             }
