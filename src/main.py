@@ -1773,12 +1773,25 @@ class App:
                 if is_user:
                     body = T(content, size=14, color=bubble_fg,
                              selectable=True)
+                    bubble_content = (
+                        ft.Column([
+                            body,
+                            ft.TextButton(
+                                "تلاش دوباره",
+                                on_click=lambda e, value=content: self.spawn(
+                                    send(retry_text=value)
+                                ),
+                            ),
+                        ], spacing=2, tight=True)
+                        if msg.get("status") == "failed" else body
+                    )
                 else:
                     body = self._assistant_message_body(content)
+                    bubble_content = body
                 list_view.controls.append(
                     ft.Row([
                         ft.Container(
-                            content=body,
+                            content=bubble_content,
                             padding=ft.Padding.symmetric(
                                 horizontal=14, vertical=10
                             ),
@@ -1807,21 +1820,50 @@ class App:
         prompt = tf("پیام خود را بنویس...", multiline=True, min_lines=1,
                     max_lines=4)
 
-        async def send(_=None):
-            text = (prompt.value or "").strip()
+        async def send(_=None, retry_text: str | None = None):
+            text = (retry_text if retry_text is not None else prompt.value or "").strip()
             if not text:
                 return
+
+            retrying = (
+                retry_text is not None
+                and bool(self.chat_messages)
+                and self.chat_messages[-1].get("role") == "user"
+                and self.chat_messages[-1].get("status") == "failed"
+                and self.chat_messages[-1].get("text") == text
+            )
+            if retrying:
+                user_message = self.chat_messages[-1]
+                user_message["status"] = "sending"
+            else:
+                user_message = {
+                    "role": "user", "text": text, "status": "sending",
+                }
+                self.chat_messages.append(user_message)
+
             prompt.value = ""
-            self.chat_messages.append({"role": "user", "text": text})
             rebuild()
             try:
-                reply = await self.api.ai(
-                    "create", text, prompt=text
-                )
+                reply = await self.api.ai("create", text, prompt=text)
             except ApiError as e:
+                # Keep the user's text recoverable and offer a one-tap retry.
+                prompt.value = text
+                user_message["status"] = "failed"
+                rebuild()
+                try:
+                    await self.api._store_verified(
+                        "chat_history",
+                        self.chat_messages[-config.CHAT_HISTORY_LIMIT:],
+                    )
+                except Exception:
+                    pass
                 self.toast(str(e), error=True)
                 return
-            self.chat_messages.append({"role": "assistant", "text": reply})
+
+            user_message["status"] = "ready"
+            self.chat_messages.append({
+                "role": "assistant", "text": reply, "status": "ready",
+            })
             try:
                 await self.api._store_verified(
                     "chat_history",
