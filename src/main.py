@@ -924,15 +924,22 @@ class App:
             if not cid.value or not cid.value.strip():
                 return self.toast("شناسه کانال را وارد کنید", error=True)
             try:
+                connection = None
                 if (bot_token.value or "").strip():
-                    await self.api.post("/connections", {
+                    connection = await self.api.post("/connections", {
                         "name": "اتصال اصلی",
                         "token": bot_token.value.strip(),
                     })
-                await self.api.post("/channels", {
+                else:
+                    existing = await self.api.get("/connections")
+                    connection = existing[0] if existing else None
+                channel_payload = {
                     "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
-                })
+                }
+                if isinstance(connection, dict) and connection.get("id") is not None:
+                    channel_payload["connection_id"] = connection["id"]
+                await self.api.post("/channels", channel_payload)
             except ApiError as err:
                 return self.toast(str(err), error=True)
             self.toast("کانال با موفقیت اضافه شد.")
