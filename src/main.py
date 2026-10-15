@@ -1692,9 +1692,15 @@ class App:
             (c for c in self.channels if c.get("id") == channel_id), None
         )
         title = channel.get("title") if channel else "تاریخچه کانال"
-        posts = await self._safe_get(
-            f"/channels/{channel_id}/history", []
-        )
+        try:
+            posts = await self.api.get("/history", params={
+                "channel_id": channel_id,
+                "status": "all",
+                "limit": 200,
+                "offset": 0,
+            })
+        except ApiError:
+            posts = []
         children = [
             self.gradient_header(
                 title or "تاریخچه",
