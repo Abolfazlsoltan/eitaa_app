@@ -523,7 +523,11 @@ class Api:
             data = json.loads(raw)
         except (TypeError, ValueError):
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if "display_name" not in data and isinstance(data.get("name"), str):
+            data["display_name"] = data["name"]
+        return data
 
     async def has_profile(self) -> bool:
         return bool(await self.get_profile())
