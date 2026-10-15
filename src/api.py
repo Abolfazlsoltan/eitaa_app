@@ -173,8 +173,13 @@ def normalize_channel(raw: str) -> str:
     return raw.lstrip("@")
 
 
+def _utcnow_naive() -> dt.datetime:
+    """Return UTC now as naive datetime for the existing local-storage schema."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
 def _iso_now() -> str:
-    return dt.datetime.utcnow().isoformat(timespec="seconds")
+    return _utcnow_naive().isoformat(timespec="seconds")
 
 
 def _mask_secret(text: str, secret: str) -> str:
@@ -596,7 +601,7 @@ class Api:
         if not notification_id:
             return
         until = (
-            dt.datetime.utcnow() + dt.timedelta(days=max(1, int(days)))
+            _utcnow_naive() + dt.timedelta(days=max(1, int(days)))
         ).isoformat(timespec="seconds")
         state = await self.notification_state()
         entry = state.get(notification_id) or {}
@@ -626,7 +631,7 @@ class Api:
         if notification.get("active") is False:
             return "skip"
 
-        now = now or dt.datetime.utcnow()
+        now = now or _utcnow_naive()
         expires = notification.get("expires_at")
         if isinstance(expires, str) and expires.strip():
             try:
