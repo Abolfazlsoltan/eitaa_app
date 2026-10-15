@@ -534,15 +534,27 @@ class Api:
 
     async def save_profile(
         self,
-        name: str = "",
+        name: str | dict = "",
         username: str = "",
         avatar_b64: str = "",
         avatar_mime: str = "",
     ) -> dict:
+        # Accept both the old positional call and the profile dialog's dict.
+        payload = name if isinstance(name, dict) else {}
+        display_name = (
+            payload.get("display_name") or payload.get("name") or ""
+            if payload else name
+        )
+        if payload:
+            username = payload.get("username", username)
+            avatar_b64 = payload.get("avatar_b64", avatar_b64)
+            avatar_mime = payload.get("avatar_mime", avatar_mime)
         current = await self.get_profile()
+        display_name = str(display_name or "").strip()
         profile = {
-            "name": (name or "").strip(),
-            "username": (username or "").strip(),
+            "display_name": display_name,
+            "name": display_name,
+            "username": str(username or "").strip(),
             "avatar_b64": avatar_b64 or current.get("avatar_b64", ""),
             "avatar_mime": avatar_mime or current.get("avatar_mime", ""),
             "updated_at": _iso_now(),
