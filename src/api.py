@@ -1043,8 +1043,27 @@ class Api:
             raise ApiError("شناسه پیام باید عدد صحیح مثبت باشد.")
 
         mode = body.get("mode", "draft")
+        if mode not in ("draft", "now", "schedule"):
+            raise ApiError("حالت انتشار معتبر نیست.")
+        scheduled_at = None
         if mode == "schedule":
-            raise ApiError("برای زمان‌بندی انتشار به اتصال سرور نیاز دارید.")
+            raw_scheduled_at = body.get("scheduled_at")
+            if not isinstance(raw_scheduled_at, str) or not raw_scheduled_at.strip():
+                raise ApiError("تاریخ و ساعت انتشار را مشخص کنید.")
+            try:
+                scheduled_at = dt.datetime.fromisoformat(
+                    raw_scheduled_at.strip().replace("Z", "+00:00")
+                )
+                if scheduled_at.tzinfo is not None:
+                    scheduled_at = scheduled_at.astimezone(
+                        dt.timezone.utc
+                    ).replace(tzinfo=None)
+            except ValueError as exc:
+                raise ApiError("تاریخ و ساعت انتشار معتبر نیست.") from exc
+            if scheduled_at <= _utcnow_naive():
+                raise ApiError("زمان انتشار باید در آینده باشد.")
+            if scheduled_at > _utcnow_naive() + dt.timedelta(days=30):
+                raise ApiError("زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
 
         channel_ids = list(body.get("channel_ids") or [])
         if mode != "draft" and not channel_ids:
@@ -1058,8 +1077,10 @@ class Api:
             "title": (body.get("title") or "").strip(),
             "text": text,
             "signature": (body.get("signature") or "").strip(),
-            "status": "draft" if mode == "draft" else "queued",
-            "scheduled_at": None,
+            "status": {"draft": "draft", "now": "queued",
+                        "schedule": "scheduled"}[mode],
+            "scheduled_at": scheduled_at.isoformat(timespec="seconds")
+                if scheduled_at else None,
             "created_at": _iso_now(),
             "updated_at": _iso_now(),
             "silent": bool(body.get("silent")),
@@ -1071,7 +1092,8 @@ class Api:
                 {
                     "id": new_id * 1000 + i,
                     "channel_id": cid,
-                    "status": "draft" if mode == "draft" else "queued",
+                    "status": {"draft": "draft", "now": "queued",
+                                "schedule": "scheduled"}[mode],
                     "error": "",
                 }
                 for i, cid in enumerate(channel_ids)
