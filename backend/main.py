@@ -331,9 +331,9 @@ class RemovalReminderTimeIn(BaseModel):
 
 
 class AIIn(BaseModel):
-    action: str
-    text: str = ""
-    prompt: str = ""
+    action: str = Field(min_length=1, max_length=40)
+    text: str = Field(default="", max_length=20_000)
+    prompt: str = Field(default="", max_length=4_000)
     language: Literal["fa", "en", "ar"] = "fa"
     tone: Literal["neutral", "formal", "friendly", "news"] = "neutral"
     length: Literal["short", "medium", "long"] = "medium"
@@ -1034,6 +1034,8 @@ def activity():
 
 @app.post("/api/ai")
 async def run_ai(b: AIIn):
+    if len(b.text) + len(b.prompt) > 20_000:
+        raise HTTPException(413, "متن درخواست بیش از حد طولانی است.")
     instruction = b.prompt.strip() or ai.ACTIONS.get(b.action)
     if not instruction:
         raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
@@ -1061,6 +1063,11 @@ async def run_ai(b: AIIn):
         )
     except ai.AIError as e:
         raise HTTPException(502, str(e))
+    if not isinstance(out, str) or not out.strip():
+        raise HTTPException(502, "سرویس هوش مصنوعی پاسخ معتبری نداد.")
+    if len(out) > 50_000:
+        raise HTTPException(502, "پاسخ هوش مصنوعی بیش از حد بزرگ است.")
+    out = out.strip()
     with Session() as s:
         s.add(AIUsage(action=b.action,
                       chars_in=len(b.text), chars_out=len(out)))
@@ -1128,10 +1135,14 @@ def _media_row(s, m: MediaAsset) -> dict:
 
 @app.post("/api/media")
 async def upload(file: UploadFile = File(...), tags: str = Form("")):
+    if len(tags) > 2_000:
+        raise HTTPException(413, "برچسب‌های فایل بیش از حد طولانی هستند.")
     data = await file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "حجم فایل بیش از ۲۰ مگابایت است.")
-    name = os.path.basename(file.filename or "file")
+    if not data:
+        raise HTTPException(400, "فایل خالی است؛ فایل دیگری انتخاب کنید.")
+    name = os.path.basename(file.filename or "file").strip()[:255] or "file"
     stored = uuid.uuid4().hex + os.path.splitext(name)[1][:10]
     with open(os.path.join(MEDIA_DIR, stored), "wb") as f:
         f.write(data)
@@ -1552,6 +1563,6 @@ app.add_middleware(
         "CORS_ORIGINS",
         "tauri://localhost,http://tauri.localhost,http://localhost:5173",
     ).split(","),
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
