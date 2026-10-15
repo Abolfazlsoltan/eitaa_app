@@ -5,9 +5,9 @@ any of them at build time via environment variables, which is convenient for
 CI builds where you do not want to edit source files.
 
     EITAA_SERVER_URL   — optional backend address
-    EITAA_TOKEN        — EitaaYar bot token
-    EITAA_CHANNEL      — default channel identifier
-    GROQ_API_KEY       — Groq API key for AI features
+    EITAA_TOKEN        — optional EitaaYar bot token (never hard-code)
+    EITAA_CHANNEL      — optional default channel identifier
+    GROQ_API_KEY       — optional Groq API key (never hard-code)
 
 Values that are not read from the environment are constants intentionally
 kept in code so that the built APK behaves identically to a desktop run.
@@ -21,7 +21,7 @@ import os
 # ------------------------------------------------------------------ identity
 APP_NAME = "ایتا منیجر"
 APP_TAGLINE = "مدیریت هوشمند کانال‌های ایتا"
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 # Package / org identifier used by the Flet build. Kept here so code paths
 # that display it (About screen, update dialog) always match pyproject.toml.
@@ -38,20 +38,14 @@ SERVER_URL = os.getenv("EITAA_SERVER_URL", "").strip().rstrip("/")
 
 # --------------------------------------------------------------- credentials
 # EitaaYar bot token used to publish on the user's behalf.
-EITAA_TOKEN = os.getenv(
-    "EITAA_TOKEN",
-    "bot278898:9e293be8-2dc3-4483-9e0b-f81d0f39efc7",
-)
+EITAA_TOKEN = os.getenv("EITAA_TOKEN", "").strip()
 
 # Channel that the app connects to automatically on first run.
-EITAA_CHANNEL = os.getenv("EITAA_CHANNEL", "11259266")
+EITAA_CHANNEL = os.getenv("EITAA_CHANNEL", "").strip()
 
 
 # --------------------------------------------------------------- AI service
-GROQ_API_KEY = os.getenv(
-    "GROQ_API_KEY",
-    "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",
-)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 

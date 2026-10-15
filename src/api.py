@@ -165,16 +165,22 @@ _SAFE_ERRORS = {
 
 
 def normalize_channel(raw: str) -> str:
-    """Turn a link, @username or id into a bare channel identifier."""
-    raw = (raw or "").strip()
-    m = _CHANNEL_RE.match(raw)
-    if m:
-        return m.group(1)
-    return raw.lstrip("@")
+    """Normalize an Eitaa link, @username, or numeric channel ID safely."""
+    raw = str(raw or "").strip()
+    match = _CHANNEL_RE.match(raw)
+    if match:
+        return match.group(1)
+    value = raw.lstrip("@")
+    return value if re.fullmatch(r"[A-Za-z0-9_+-]{1,200}", value) else ""
+
+
+def _utcnow_naive() -> dt.datetime:
+    """Return UTC now as naive datetime for the existing local-storage schema."""
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
 def _iso_now() -> str:
-    return dt.datetime.utcnow().isoformat(timespec="seconds")
+    return _utcnow_naive().isoformat(timespec="seconds")
 
 
 def _mask_secret(text: str, secret: str) -> str:
@@ -221,6 +227,59 @@ class Api:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    async def process_due_scheduled(self) -> int:
+        """Publish due local posts while the app process is running."""
+        if self.online:
+            return 0
+        posts = await self._load("posts", [])
+        now_utc = _utcnow_naive()
+        due = []
+        for post in posts:
+            if post.get("status") != "scheduled":
+                continue
+            raw = post.get("scheduled_at")
+            if not isinstance(raw, str):
+                continue
+            try:
+                scheduled = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if scheduled.tzinfo is not None:
+                    scheduled = scheduled.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            except ValueError:
+                continue
+            if scheduled <= now_utc:
+                post["status"] = "queued"
+                for delivery in post.get("deliveries", []):
+                    if delivery.get("status") == "scheduled":
+                        delivery["status"] = "queued"
+                due.append(post)
+        if not due:
+            return 0
+        # Persist the claim before network I/O to avoid duplicate sends if
+        # the app is interrupted while publishing.
+        await self._save("posts", posts)
+        for post in due:
+            try:
+                await self._publish(post)
+            except Exception:
+                # A network call may have reached Eitaa even if the client
+                # then failed. Do not auto-retry: that could duplicate a post.
+                # Record a visible failure for manual review instead of
+                # leaving the item stuck in "queued" forever.
+                logger.exception(
+                    "Scheduled post %s failed unexpectedly",
+                    post.get("id"),
+                )
+                post["status"] = "failed"
+                for delivery in post.get("deliveries", []):
+                    if delivery.get("status") in ("queued", "sending"):
+                        delivery["status"] = "failed"
+                        delivery["error"] = (
+                            "ارسال زمان‌بندی‌شده با خطا مواجه شد؛ "
+                            "وضعیت کانال را بررسی کنید."
+                        )
+        await self._save("posts", posts)
+        return len(due)
 
     # -------------------------------------------------------- public API ---
     async def get(self, path: str, params: dict | None = None) -> Any:
@@ -275,6 +334,27 @@ class Api:
         self, action: str, text: str, prompt: str = "",
         language: str = "fa", tone: str = "neutral", length: str = "medium",
     ) -> str:
+        # Validate and bound data before it leaves the device.
+        action = action.strip() if isinstance(action, str) else ""
+        text = text.strip() if isinstance(text, str) else ""
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+        language = language.strip() if isinstance(language, str) else "fa"
+        tone = tone.strip() if isinstance(tone, str) else "neutral"
+        length = length.strip() if isinstance(length, str) else "medium"
+
+        if action not in _AI_ACTIONS:
+            raise ApiError("نوع درخواست دستیار هوشمند معتبر نیست.")
+        if not text and not prompt:
+            raise ApiError("ابتدا متن یا توضیح درخواست را وارد کنید.")
+        if len(text) + len(prompt) > 20_000:
+            raise ApiError("متن درخواست خیلی طولانی است؛ آن را کوتاه‌تر کنید.")
+        if language not in ("fa", "en", "ar"):
+            raise ApiError("زبان خروجی پشتیبانی نمی‌شود.")
+        if tone not in ("neutral", "formal", "friendly", "news"):
+            raise ApiError("لحن انتخاب‌شده معتبر نیست.")
+        if length not in ("short", "medium", "long"):
+            raise ApiError("اندازهٔ پاسخ انتخاب‌شده معتبر نیست.")
+
         result = await self._anonymous_ai(
             {
                 "action": action,
@@ -285,7 +365,10 @@ class Api:
                 "length": length,
             }
         )
-        return str(result["text"])
+        output = result.get("text") if isinstance(result, dict) else None
+        if not isinstance(output, str) or not output.strip():
+            raise ApiError("دستیار هوشمند پاسخ معتبری برنگرداند.")
+        return output.strip()
 
     async def ai_settings(self) -> dict:
         provider = await self.storage.get("ai_provider") or "groq"
@@ -493,22 +576,38 @@ class Api:
             data = json.loads(raw)
         except (TypeError, ValueError):
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        if "display_name" not in data and isinstance(data.get("name"), str):
+            data["display_name"] = data["name"]
+        return data
 
     async def has_profile(self) -> bool:
         return bool(await self.get_profile())
 
     async def save_profile(
         self,
-        name: str = "",
+        name: str | dict = "",
         username: str = "",
         avatar_b64: str = "",
         avatar_mime: str = "",
     ) -> dict:
+        # Accept both the old positional call and the profile dialog's dict.
+        payload = name if isinstance(name, dict) else {}
+        display_name = (
+            payload.get("display_name") or payload.get("name") or ""
+            if payload else name
+        )
+        if payload:
+            username = payload.get("username", username)
+            avatar_b64 = payload.get("avatar_b64", avatar_b64)
+            avatar_mime = payload.get("avatar_mime", avatar_mime)
         current = await self.get_profile()
+        display_name = str(display_name or "").strip()
         profile = {
-            "name": (name or "").strip(),
-            "username": (username or "").strip(),
+            "display_name": display_name,
+            "name": display_name,
+            "username": str(username or "").strip(),
             "avatar_b64": avatar_b64 or current.get("avatar_b64", ""),
             "avatar_mime": avatar_mime or current.get("avatar_mime", ""),
             "updated_at": _iso_now(),
@@ -572,7 +671,7 @@ class Api:
         if not notification_id:
             return
         until = (
-            dt.datetime.utcnow() + dt.timedelta(days=max(1, int(days)))
+            _utcnow_naive() + dt.timedelta(days=max(1, int(days)))
         ).isoformat(timespec="seconds")
         state = await self.notification_state()
         entry = state.get(notification_id) or {}
@@ -602,7 +701,7 @@ class Api:
         if notification.get("active") is False:
             return "skip"
 
-        now = now or dt.datetime.utcnow()
+        now = now or _utcnow_naive()
         expires = notification.get("expires_at")
         if isinstance(expires, str) and expires.strip():
             try:
@@ -961,7 +1060,7 @@ class Api:
         if not connections or not connections[0].get("verified"):
             await self._connect_eitaa({})
 
-        cid = normalize_channel(body.get("value") or "")
+        cid = normalize_channel(body.get("value") or body.get("channel_id") or "")
         if not cid:
             raise ApiError("شناسه کانال معتبر نیست.")
 
@@ -997,8 +1096,27 @@ class Api:
             raise ApiError("شناسه پیام باید عدد صحیح مثبت باشد.")
 
         mode = body.get("mode", "draft")
+        if mode not in ("draft", "now", "schedule"):
+            raise ApiError("حالت انتشار معتبر نیست.")
+        scheduled_at = None
         if mode == "schedule":
-            raise ApiError("برای زمان‌بندی انتشار به اتصال سرور نیاز دارید.")
+            raw_scheduled_at = body.get("scheduled_at")
+            if not isinstance(raw_scheduled_at, str) or not raw_scheduled_at.strip():
+                raise ApiError("تاریخ و ساعت انتشار را مشخص کنید.")
+            try:
+                scheduled_at = dt.datetime.fromisoformat(
+                    raw_scheduled_at.strip().replace("Z", "+00:00")
+                )
+                if scheduled_at.tzinfo is not None:
+                    scheduled_at = scheduled_at.astimezone(
+                        dt.timezone.utc
+                    ).replace(tzinfo=None)
+            except ValueError as exc:
+                raise ApiError("تاریخ و ساعت انتشار معتبر نیست.") from exc
+            if scheduled_at <= _utcnow_naive():
+                raise ApiError("زمان انتشار باید در آینده باشد.")
+            if scheduled_at > _utcnow_naive() + dt.timedelta(days=30):
+                raise ApiError("زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
 
         channel_ids = list(body.get("channel_ids") or [])
         if mode != "draft" and not channel_ids:
@@ -1012,8 +1130,10 @@ class Api:
             "title": (body.get("title") or "").strip(),
             "text": text,
             "signature": (body.get("signature") or "").strip(),
-            "status": "draft" if mode == "draft" else "queued",
-            "scheduled_at": None,
+            "status": {"draft": "draft", "now": "queued",
+                        "schedule": "scheduled"}[mode],
+            "scheduled_at": scheduled_at.isoformat(timespec="seconds")
+                if scheduled_at else None,
             "created_at": _iso_now(),
             "updated_at": _iso_now(),
             "silent": bool(body.get("silent")),
@@ -1025,7 +1145,8 @@ class Api:
                 {
                     "id": new_id * 1000 + i,
                     "channel_id": cid,
-                    "status": "draft" if mode == "draft" else "queued",
+                    "status": {"draft": "draft", "now": "queued",
+                                "schedule": "scheduled"}[mode],
                     "error": "",
                 }
                 for i, cid in enumerate(channel_ids)
@@ -1136,8 +1257,21 @@ class Api:
         mode = body.get("mode", "draft")
         if mode not in ("draft", "now", "schedule"):
             raise ApiError("حالت انتشار نامعتبر است.")
+        scheduled_at = None
         if mode == "schedule":
-            raise ApiError("برای زمان‌بندی انتشار به اتصال سرور نیاز دارید.")
+            raw_scheduled_at = body.get("scheduled_at")
+            if not isinstance(raw_scheduled_at, str) or not raw_scheduled_at.strip():
+                raise ApiError("تاریخ و ساعت انتشار را مشخص کنید.")
+            try:
+                scheduled_at = dt.datetime.fromisoformat(raw_scheduled_at.strip().replace("Z", "+00:00"))
+                if scheduled_at.tzinfo is not None:
+                    scheduled_at = scheduled_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            except ValueError as exc:
+                raise ApiError("تاریخ و ساعت انتشار معتبر نیست.") from exc
+            if scheduled_at <= _utcnow_naive():
+                raise ApiError("زمان انتشار باید در آینده باشد.")
+            if scheduled_at > _utcnow_naive() + dt.timedelta(days=30):
+                raise ApiError("زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
         posts = await self._load("posts", [])
         post = next((p for p in posts if p.get("id") == post_id), None)
         if post is None:
@@ -1151,7 +1285,7 @@ class Api:
         known_channels = {c.get("id") for c in channels}
         if any(cid not in known_channels for cid in channel_ids):
             raise ApiError("یکی از کانال‌های انتخاب‌شده پیدا نشد.")
-        if mode == "now" and not channel_ids:
+        if mode != "draft" and not channel_ids:
             raise ApiError("حداقل یک کانال انتخاب کنید.")
         revisions = post.setdefault("revisions", [])
         if any(
@@ -1178,19 +1312,22 @@ class Api:
             "view_to_delete": body.get("view_to_delete"),
             "reply_to_message_id": body.get("reply_to_message_id"),
             "media_id": body.get("media_id"),
-            "scheduled_at": None,
+            "scheduled_at": scheduled_at.isoformat(timespec="seconds")
+                if scheduled_at else None,
             "deliveries": [
                 {
                     "id": post_id * 1000 + i,
                     "channel_id": cid,
-                    "status": "draft" if mode == "draft" else "queued",
+                    "status": {"draft": "draft", "now": "queued",
+                                "schedule": "scheduled"}[mode],
                     "error": "",
                 }
                 for i, cid in enumerate(channel_ids)
             ],
         })
+        post["status"] = {"draft": "draft", "now": "queued",
+                          "schedule": "scheduled"}[mode]
         if mode == "now":
-            post["status"] = "queued"
             await self._publish(post)
         await self._save("posts", posts)
         return {"id": post_id, "status": post["status"]}

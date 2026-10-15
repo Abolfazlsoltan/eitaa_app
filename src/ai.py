@@ -23,11 +23,16 @@ from __future__ import annotations
 import logging
 import random
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 
 logger = logging.getLogger(__name__)
+
+_MAX_PROMPT_CHARS = 20_000
+_MAX_RESPONSE_CHARS = 50_000
+_MAX_TOKENS = 4_096
 
 
 # --------------------------------------------------------------- helpers ---
@@ -122,11 +127,15 @@ class AnonymousAI:
         max_tokens: int = 1500,
         temperature: float = 0.7,
     ):
+        # Bound caller-supplied values so a bad config cannot create an
+        # effectively unbounded request or an invalid provider payload.
+        timeout = min(max(float(timeout), 5.0), 90.0)
+        connect_timeout = min(max(float(connect_timeout), 2.0), 20.0)
         self.timeout = httpx.Timeout(timeout, connect=connect_timeout)
-        self.base_timeout_seconds = float(timeout)
-        self.connect_timeout_seconds = float(connect_timeout)
-        self.max_tokens = int(max_tokens)
-        self.temperature = float(temperature)
+        self.base_timeout_seconds = timeout
+        self.connect_timeout_seconds = connect_timeout
+        self.max_tokens = min(max(int(max_tokens), 1), _MAX_TOKENS)
+        self.temperature = min(max(float(temperature), 0.0), 2.0)
 
     # -------------------------------------------------------- public API ---
     async def complete(self, system: str, user: str) -> str:
@@ -140,6 +149,13 @@ class AnonymousAI:
         if not isinstance(system, str) or not isinstance(user, str):
             raise AIServiceError(
                 "درخواست نامعتبر برای دستیار هوشمند."
+            )
+        system, user = system.strip(), user.strip()
+        if not user:
+            raise AIServiceError("لطفاً ابتدا متن یا توضیح درخواست را وارد کنید.")
+        if len(system) + len(user) > _MAX_PROMPT_CHARS:
+            raise AIServiceError(
+                "متن درخواست خیلی طولانی است؛ آن را کوتاه‌تر کنید و دوباره تلاش کنید."
             )
 
         providers = list(self._PROVIDER_ORDER)
@@ -226,6 +242,9 @@ class AnonymousAI:
     async def _post_completion(
         self, url: str, model: str, system: str, user: str
     ) -> str:
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != "https" or not parsed_url.hostname:
+            raise AIServiceError("نشانی سرویس هوش مصنوعی معتبر نیست.")
         payload = {
             "model": model,
             "messages": [
@@ -303,6 +322,8 @@ class AnonymousAI:
         cleaned = content.strip()
         if not cleaned:
             raise AIServiceError("Public AI service returned an empty response.")
+        if len(cleaned) > _MAX_RESPONSE_CHARS:
+            raise AIServiceError("Public AI service returned an oversized response.")
         return cleaned
 
     # ---------------------------------------------------------- timing -----

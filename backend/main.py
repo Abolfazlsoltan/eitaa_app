@@ -331,9 +331,9 @@ class RemovalReminderTimeIn(BaseModel):
 
 
 class AIIn(BaseModel):
-    action: str
-    text: str = ""
-    prompt: str = ""
+    action: str = Field(min_length=1, max_length=30)
+    text: str = Field(default="", max_length=20_000)
+    prompt: str = Field(default="", max_length=4_000)
     language: Literal["fa", "en", "ar"] = "fa"
     tone: Literal["neutral", "formal", "friendly", "news"] = "neutral"
     length: Literal["short", "medium", "long"] = "medium"
@@ -368,22 +368,22 @@ class AutoIn(BaseModel):
 
 
 class RegIn(BaseModel):
-    username: str
-    password: str
-    display_name: str = ""
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=8, max_length=1024)
+    display_name: str = Field(default="", max_length=100)
 
 
 class LoginIn(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class MemberIn(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=60)
+    password: str = Field(min_length=8, max_length=1024)
     role: str = "editor"
-    display_name: str = ""
-    eitaa_id: str | None = None
+    display_name: str = Field(default="", max_length=100)
+    eitaa_id: str | None = Field(default=None, max_length=40)
 
 
 # ============================================================= connections
@@ -1034,6 +1034,10 @@ def activity():
 
 @app.post("/api/ai")
 async def run_ai(b: AIIn):
+    if b.action not in ai.ACTIONS:
+        raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
+    if len(b.text) + len(b.prompt) > 20_000:
+        raise HTTPException(413, "متن درخواست بیش از حد طولانی است.")
     instruction = b.prompt.strip() or ai.ACTIONS.get(b.action)
     if not instruction:
         raise HTTPException(400, "عملیات هوش مصنوعی نامعتبر است.")
@@ -1061,6 +1065,11 @@ async def run_ai(b: AIIn):
         )
     except ai.AIError as e:
         raise HTTPException(502, str(e))
+    if not isinstance(out, str) or not out.strip():
+        raise HTTPException(502, "سرویس هوش مصنوعی پاسخ معتبری نداد.")
+    if len(out) > 50_000:
+        raise HTTPException(502, "پاسخ هوش مصنوعی بیش از حد بزرگ است.")
+    out = out.strip()
     with Session() as s:
         s.add(AIUsage(action=b.action,
                       chars_in=len(b.text), chars_out=len(out)))
@@ -1128,10 +1137,14 @@ def _media_row(s, m: MediaAsset) -> dict:
 
 @app.post("/api/media")
 async def upload(file: UploadFile = File(...), tags: str = Form("")):
+    if len(tags) > 2_000:
+        raise HTTPException(413, "برچسب‌های فایل بیش از حد طولانی هستند.")
     data = await file.read(MAX_UPLOAD + 1)
     if len(data) > MAX_UPLOAD:
         raise HTTPException(413, "حجم فایل بیش از ۲۰ مگابایت است.")
-    name = os.path.basename(file.filename or "file")
+    if not data:
+        raise HTTPException(400, "فایل خالی است؛ فایل دیگری انتخاب کنید.")
+    name = os.path.basename(file.filename or "file").strip()[:255] or "file"
     stored = uuid.uuid4().hex + os.path.splitext(name)[1][:10]
     with open(os.path.join(MEDIA_DIR, stored), "wb") as f:
         f.write(data)
@@ -1399,6 +1412,8 @@ def _user(u: User) -> dict:
 def _check_pw(pw: str) -> None:
     if len(pw) < 8:
         raise HTTPException(400, "رمز عبور باید حداقل ۸ نویسه باشد.")
+    if len(pw) > 1024:
+        raise HTTPException(400, "رمز عبور بیش از حد طولانی است.")
 
 
 @app.get("/api/auth/state")
@@ -1514,7 +1529,9 @@ RULES = [
     (("POST",), r"^/api/removal-reminders/\d+/(cancel|reschedule)", "edit"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
+    (("POST",), r"^/api/posts$", "edit"),
     (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
+    (("POST",), r"^/api/posts/\d+/publish$", "publish"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
     (("POST",), r"^/api/posts/\d+/(approve|reject)", "approve"),
     (("POST", "DELETE"), r"^/api/(templates|media|automations|ai)", "edit"),
@@ -1537,21 +1554,39 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "ابتدا وارد شوید."}, status_code=401)
     request.state.user = u
 
+    matched_rule = False
     for methods, rx, perm in RULES:
-        if (request.method in methods and re.match(rx, path)
-                and not auth.can(u.role, perm)):
-            return JSONResponse(
-                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
-                status_code=403)
+        if request.method in methods and re.match(rx, path):
+            matched_rule = True
+            if not auth.can(u.role, perm):
+                return JSONResponse(
+                    {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                    status_code=403,
+                )
+            break
+
+    # Non-owner write operations must match an explicit permission rule.
+    # This prevents new endpoints from accidentally bypassing role checks.
+    if (not matched_rule
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not auth.can(u.role, "*")):
+        return JSONResponse(
+            {"detail": "برای این عملیات مجوز مشخصی تعریف نشده است."},
+            status_code=403,
+        )
     return await call_next(request)
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv(
-        "CORS_ORIGINS",
-        "tauri://localhost,http://tauri.localhost,http://localhost:5173",
-    ).split(","),
-    allow_methods=["*"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "tauri://localhost,http://tauri.localhost,http://localhost:5173",
+        ).split(",")
+        if origin.strip()
+    ],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )

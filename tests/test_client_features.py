@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 import sys
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from api import Api, ApiError
+from api import Api, ApiError, normalize_channel
 
 
 class MemoryStorage:
@@ -35,6 +36,16 @@ class ClientFeatureTests(unittest.TestCase):
         self.api = Api(self.storage)
         self.api.base = ""
 
+    def test_channel_normalization_rejects_malformed_identifiers(self):
+        self.assertEqual(
+            normalize_channel("https://eitaa.com/sample_channel"),
+            "sample_channel",
+        )
+        self.assertEqual(normalize_channel("@sample_channel"), "sample_channel")
+        self.assertEqual(normalize_channel("-10012345"), "-10012345")
+        self.assertEqual(normalize_channel("../invalid"), "")
+        self.assertEqual(normalize_channel(""), "")
+
     def test_local_draft_can_be_updated_and_deleted(self):
         async def run():
             created = await self.api._create_post({
@@ -52,6 +63,88 @@ class ClientFeatureTests(unittest.TestCase):
             self.assertEqual(posts[0]["text"], "Edited body")
             await self.api.delete(f"/posts/{created['id']}")
             self.assertEqual(await self.api.get("/posts"), [])
+
+        asyncio.run(run())
+
+    def test_local_schedule_is_saved_with_validated_utc_time(self):
+        async def run():
+            await self.api._save("channels", [{
+                "id": 1, "title": "test", "chat_id": "test-channel",
+            }])
+            scheduled_at = (
+                dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+            ).isoformat()
+            result = await self.api._create_post({
+                "text": "scheduled body",
+                "channel_ids": [1],
+                "mode": "schedule",
+                "scheduled_at": scheduled_at,
+            })
+            posts = await self.api.get("/posts")
+            self.assertEqual(result["status"], "scheduled")
+            self.assertEqual(posts[0]["status"], "scheduled")
+            self.assertEqual(posts[0]["deliveries"][0]["status"], "scheduled")
+            self.assertIsNotNone(posts[0]["scheduled_at"])
+
+        asyncio.run(run())
+
+    def test_local_scheduler_publishes_due_posts_once(self):
+        async def run():
+            await self.api._save("posts", [{
+                "id": 4,
+                "title": "due post",
+                "text": "body",
+                "status": "scheduled",
+                "scheduled_at": "2000-01-01T00:00:00",
+                "deliveries": [{"channel_id": 1, "status": "scheduled"}],
+            }])
+
+            async def publish(post):
+                post["status"] = "published"
+                post["deliveries"][0]["status"] = "published"
+
+            self.api._publish = AsyncMock(side_effect=publish)
+            self.assertEqual(await self.api.process_due_scheduled(), 1)
+            self.assertEqual(await self.api.process_due_scheduled(), 0)
+            posts = await self.api.get("/posts")
+            self.assertEqual(posts[0]["status"], "published")
+            self.api._publish.assert_awaited_once()
+
+        asyncio.run(run())
+
+    def test_local_scheduler_records_unexpected_publish_failure(self):
+        async def run():
+            await self.api._save("posts", [{
+                "id": 5,
+                "title": "due post",
+                "text": "body",
+                "status": "scheduled",
+                "scheduled_at": "2000-01-01T00:00:00",
+                "deliveries": [{"channel_id": 1, "status": "scheduled"}],
+            }])
+            self.api._publish = AsyncMock(
+                side_effect=RuntimeError("simulated unexpected failure")
+            )
+
+            self.assertEqual(await self.api.process_due_scheduled(), 1)
+            posts = await self.api.get("/posts")
+            self.assertEqual(posts[0]["status"], "failed")
+            self.assertEqual(posts[0]["deliveries"][0]["status"], "failed")
+            self.assertIn("وضعیت کانال", posts[0]["deliveries"][0]["error"])
+            self.assertEqual(await self.api.process_due_scheduled(), 0)
+
+        asyncio.run(run())
+
+    def test_profile_dialog_dict_persists_display_name(self):
+        async def run():
+            saved = await self.api.save_profile({
+                "display_name": "Test User",
+                "username": "test_user",
+            })
+            loaded = await self.api.get_profile()
+            self.assertEqual(saved["display_name"], "Test User")
+            self.assertEqual(loaded["display_name"], "Test User")
+            self.assertEqual(loaded["name"], "Test User")
 
         asyncio.run(run())
 

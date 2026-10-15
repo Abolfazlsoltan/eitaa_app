@@ -26,6 +26,7 @@ Design guarantees
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import urlparse
 import base64
 import logging
 
@@ -265,6 +266,10 @@ class AssetCache:
         client: httpx.AsyncClient, url: str,
     ) -> bytes | None:
         """Fetch a single URL, returning bytes or ``None`` on any failure."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            logger.warning("Skipping non-HTTPS asset URL.")
+            return None
         try:
             response = await client.get(url)
         except (httpx.HTTPError, ValueError):
@@ -281,7 +286,17 @@ class AssetCache:
         content_type = (response.headers.get("content-type") or "").lower()
         if "text/html" in content_type:
             return None
-        return data
+        # Image widgets should never cache arbitrary binary or JSON payloads.
+        if content_type and not content_type.startswith("image/"):
+            return None
+        # Check common image signatures even if a proxy omits content-type.
+        is_image = (
+            data.startswith(b"\x89PNG\r\n\x1a\n")
+            or data.startswith(b"\xff\xd8\xff")
+            or data.startswith((b"GIF87a", b"GIF89a"))
+            or (len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP")
+        )
+        return data if is_image else None
 
 
 # ================================================================== helpers

@@ -83,5 +83,26 @@ class GroqFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.post.await_count, 2)
 
 
+class AIRequestHardeningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejects_insecure_remote_endpoint_before_network(self):
+        with (
+            patch.dict(os.environ, {"AI_API_KEY": "test-key"}),
+            patch("backend.ai.GroqProvider.endpoint", "http://example.com/chat"),
+            patch("backend.ai.httpx.AsyncClient") as client,
+        ):
+            provider = GroqProvider()
+            with self.assertRaisesRegex(AIError, "امن یا معتبر"):
+                await provider.complete("system", "user")
+            client.assert_not_called()
+
+    async def test_rejects_empty_and_oversized_prompts(self):
+        with patch.dict(os.environ, {"AI_API_KEY": "test-key"}):
+            provider = GroqProvider()
+            with self.assertRaises(AIError):
+                await provider.complete("system", " ")
+            with self.assertRaises(AIError):
+                await provider.complete("system", "x" * 24_001)
+
+
 if __name__ == "__main__":
     unittest.main()

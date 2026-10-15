@@ -287,6 +287,7 @@ class App:
         self.me: dict = {"name": "محلی", "role": "local"}
         self.channels: list = []
         self.view = "home"
+        self._last_primary_view = "home"
         self.theme_mode = "light"
         self.accent_name = "آبی"
         self.chat_messages: list[dict] = []
@@ -302,6 +303,18 @@ class App:
     # ------------------------------------------------------------ utilities
     def spawn(self, coro):
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    async def _local_schedule_loop(self):
+        # Local scheduling is foreground-only; a configured backend has its
+        # own persistent worker and does not use this loop.
+        while True:
+            await asyncio.sleep(15)
+            if self.api.online:
+                continue
+            try:
+                await self.api.process_due_scheduled()
+            except Exception:
+                logger.exception("Local scheduled-post worker failed")
 
     def _safe_message(self, message) -> str:
         """Return a message that is safe to show in the UI.
@@ -324,7 +337,7 @@ class App:
         return clean
 
     def toast(self, msg: str, error: bool = False):
-        text = self._safe_message(msg) if error else str(msg)
+        text = self._safe_message(msg) if error else str(msg)[:220]
         color = Palette.DANGER if error else None
         self.page.show_dialog(
             ft.SnackBar(
@@ -697,7 +710,32 @@ class App:
     async def go_nav(self, index: int):
         await self.go(NAV_VIEWS[index])
 
+    async def handle_back(self):
+        """Navigate inside the app instead of unexpectedly closing it."""
+        if self.view in ("auth", "onboarding"):
+            self.toast("برای ادامه، همین مرحله را کامل کن.")
+            return
+        if self.view in NAV_VIEWS:
+            if self.view != "home":
+                await self.go("home")
+            else:
+                self.toast("الان در صفحه اصلی هستی؛ برای خروج از برنامه از گزینه خروج استفاده کن.")
+            return
+        back_targets = {
+            "new": "posts",
+            "chat": "home",
+            "channel_history": "posts",
+            "reminders": "settings",
+            "ai_settings": "settings",
+        }
+        target = back_targets.get(self.view, self._last_primary_view)
+        if target == self.view and target not in NAV_VIEWS:
+            target = "home"
+        await self.go(target)
+
     async def go(self, name: str, *args):
+        if name in NAV_VIEWS:
+            self._last_primary_view = name
         self.view = name
         self.page.floating_action_button = self._fab_for(name)
         # The bottom bar is a tab bar; sub-screens (e.g. "new") hide it.
@@ -912,15 +950,22 @@ class App:
             if not cid.value or not cid.value.strip():
                 return self.toast("شناسه کانال را وارد کنید", error=True)
             try:
+                connection = None
                 if (bot_token.value or "").strip():
-                    await self.api.post("/connections", {
+                    connection = await self.api.post("/connections", {
                         "name": "اتصال اصلی",
                         "token": bot_token.value.strip(),
                     })
-                await self.api.post("/channels", {
-                    "channel_id": cid.value.strip(),
+                else:
+                    existing = await self.api.get("/connections")
+                    connection = existing[0] if existing else None
+                channel_payload = {
+                    "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
-                })
+                }
+                if isinstance(connection, dict) and connection.get("id") is not None:
+                    channel_payload["connection_id"] = connection["id"]
+                await self.api.post("/channels", channel_payload)
             except ApiError as err:
                 return self.toast(str(err), error=True)
             self.toast("کانال با موفقیت اضافه شد.")
@@ -1673,13 +1718,25 @@ class App:
             (c for c in self.channels if c.get("id") == channel_id), None
         )
         title = channel.get("title") if channel else "تاریخچه کانال"
-        posts = await self._safe_get(
-            f"/channels/{channel_id}/history", []
-        )
+        try:
+            posts = await self.api.get("/history", params={
+                "channel_id": channel_id,
+                "status": "all",
+                "limit": 200,
+                "offset": 0,
+            })
+        except ApiError:
+            posts = []
         children = [
             self.gradient_header(
                 title or "تاریخچه",
                 actions=[
+                    self._header_icon(
+                        ft.Icons.OPEN_IN_NEW,
+                        on_click=lambda e: self.spawn(self._open_external(
+                            "https://eitaa.com/" + str(channel.get("chat_id"))
+                        )) if channel and channel.get("chat_id") else None,
+                    ),
                     self._header_icon(
                         ft.Icons.ARROW_FORWARD,
                         on_click=lambda e: self.spawn(self.go("posts")),
@@ -1773,12 +1830,25 @@ class App:
                 if is_user:
                     body = T(content, size=14, color=bubble_fg,
                              selectable=True)
+                    bubble_content = (
+                        ft.Column([
+                            body,
+                            ft.TextButton(
+                                "تلاش دوباره",
+                                on_click=lambda e, value=content: self.spawn(
+                                    send(retry_text=value)
+                                ),
+                            ),
+                        ], spacing=2, tight=True)
+                        if msg.get("status") == "failed" else body
+                    )
                 else:
                     body = self._assistant_message_body(content)
+                    bubble_content = body
                 list_view.controls.append(
                     ft.Row([
                         ft.Container(
-                            content=body,
+                            content=bubble_content,
                             padding=ft.Padding.symmetric(
                                 horizontal=14, vertical=10
                             ),
@@ -1792,8 +1862,11 @@ class App:
                                 color=ft.Colors.with_opacity(0.06, "#0F172A"),
                                 offset=ft.Offset(0, 3),
                             ) if not is_user else None,
-                            width=min(320, self.page.width * 0.82)
-                            if self.page.width else 280,
+                            width=(
+                                min(320, self.page.width * 0.82)
+                                if isinstance(self.page.width, (int, float))
+                                and self.page.width > 0 else 280
+                            ),
                         ),
                     ], alignment=(
                         ft.MainAxisAlignment.END if is_user
@@ -1807,21 +1880,50 @@ class App:
         prompt = tf("پیام خود را بنویس...", multiline=True, min_lines=1,
                     max_lines=4)
 
-        async def send(_=None):
-            text = (prompt.value or "").strip()
+        async def send(_=None, retry_text: str | None = None):
+            text = (retry_text if retry_text is not None else prompt.value or "").strip()
             if not text:
                 return
+
+            retrying = (
+                retry_text is not None
+                and bool(self.chat_messages)
+                and self.chat_messages[-1].get("role") == "user"
+                and self.chat_messages[-1].get("status") == "failed"
+                and self.chat_messages[-1].get("text") == text
+            )
+            if retrying:
+                user_message = self.chat_messages[-1]
+                user_message["status"] = "sending"
+            else:
+                user_message = {
+                    "role": "user", "text": text, "status": "sending",
+                }
+                self.chat_messages.append(user_message)
+
             prompt.value = ""
-            self.chat_messages.append({"role": "user", "text": text})
             rebuild()
             try:
-                reply = await self.api.ai(
-                    "create", text, prompt=text
-                )
+                reply = await self.api.ai("create", text, prompt=text)
             except ApiError as e:
+                # Keep the user's text recoverable and offer a one-tap retry.
+                prompt.value = text
+                user_message["status"] = "failed"
+                rebuild()
+                try:
+                    await self.api._store_verified(
+                        "chat_history",
+                        self.chat_messages[-config.CHAT_HISTORY_LIMIT:],
+                    )
+                except Exception:
+                    pass
                 self.toast(str(e), error=True)
                 return
-            self.chat_messages.append({"role": "assistant", "text": reply})
+
+            user_message["status"] = "ready"
+            self.chat_messages.append({
+                "role": "assistant", "text": reply, "status": "ready",
+            })
             try:
                 await self.api._store_verified(
                     "chat_history",
@@ -1987,7 +2089,7 @@ class App:
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
-                "status": "draft",
+                "mode": "draft",
                 "channel_ids": list(state["selected"]),
             }
             try:
@@ -2009,19 +2111,15 @@ class App:
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
-                "status": "queued",
+                "mode": "now",
                 "channel_ids": list(state["selected"]),
             }
             try:
                 if post_id is not None:
                     await self.api.put(f"/posts/{post_id}", payload)
-                    await self.api.post(f"/posts/{post_id}/publish")
                 else:
-                    created = await self.api.post("/posts", payload)
-                    pid = created.get("id") if isinstance(created, dict) else None
-                    if pid:
-                        await self.api.post(f"/posts/{pid}/publish")
-                self.toast("در صف انتشار قرار گرفت")
+                    await self.api.post("/posts", payload)
+                self.toast("درخواست انتشار ثبت شد؛ وضعیت را در فهرست پست‌ها ببینید.")
                 await self.go("posts")
             except ApiError as e:
                 self.toast(str(e), error=True)
@@ -2041,7 +2139,7 @@ class App:
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
-                "status": "scheduled",
+                "mode": "schedule",
                 "channel_ids": list(state["selected"]),
                 "scheduled_at": to_utc_iso(when),
             }
@@ -2050,7 +2148,10 @@ class App:
                     await self.api.put(f"/posts/{post_id}", payload)
                 else:
                     await self.api.post("/posts", payload)
-                self.toast("زمان‌بندی شد")
+                self.toast(
+                    "زمان‌بندی شد" if self.api.online else
+                    "زمان‌بندی ثبت شد؛ برای اجرای خودکار، برنامه باید باز بماند."
+                )
                 await self.go("posts", "scheduled")
             except ApiError as e:
                 self.toast(str(e), error=True)
@@ -2322,43 +2423,13 @@ class App:
         await self.go("ai_settings")
 
     async def v_ai_settings(self):
-        settings = await self.api.ai_settings()
-        provider = settings.get("provider", "groq")
-        model = settings.get("model", "")
-        has_key = settings.get("has_key", False)
-
-        provider_dd = ft.Dropdown(
-            label="ارائه‌دهنده",
-            value=provider,
-            options=[
-                ft.dropdown.Option("groq", "Groq"),
-                ft.dropdown.Option("openai", "OpenAI"),
-                ft.dropdown.Option("gemini", "Gemini"),
-                ft.dropdown.Option("anthropic", "Anthropic"),
-            ],
-            border_radius=14,
-        )
-        model_f = tf("مدل", value=model)
-        key_f = tf("کلید API (در صورت نیاز)", password=True,
-                   can_reveal_password=True)
-        base_f = tf("Base URL (اختیاری برای OpenAI-compatible)")
-
-        async def save(_=None):
-            try:
-                await self.api.save_ai_settings(
-                    provider_dd.value or "groq",
-                    (model_f.value or "").strip(),
-                    (key_f.value or "").strip(),
-                    (base_f.value or "").strip(),
-                )
-                self.toast("تنظیمات ذخیره شد")
-                await self.go("settings")
-            except ApiError as e:
-                self.toast(str(e), error=True)
-
+        # The current app AI path uses the built-in anonymous provider.
+        # Avoid exposing legacy provider/key controls that are not used by
+        # Api.ai(), which would mislead users into thinking they take effect.
         return ft.Column([
             self.gradient_header(
-                "دستیار AI",
+                "دستیار هوشمند",
+                subtitle="تنظیمات و راهنمای استفاده",
                 actions=[
                     self._header_icon(
                         ft.Icons.ARROW_FORWARD,
@@ -2369,19 +2440,63 @@ class App:
             ft.Container(
                 content=ft.Column([
                     surface_card(
-                        provider_dd,
-                        model_f,
-                        key_f,
-                        base_f,
+                        ft.Row([
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.AUTO_AWESOME,
+                                    color="#FFFFFF",
+                                    size=24,
+                                ),
+                                width=52,
+                                height=52,
+                                border_radius=16,
+                                alignment=ft.Alignment(0, 0),
+                                gradient=ft.LinearGradient(
+                                    begin=ft.Alignment.TOP_LEFT,
+                                    end=ft.Alignment.BOTTOM_RIGHT,
+                                    colors=[Palette.ACCENT, Palette.PRIMARY],
+                                ),
+                            ),
+                            ft.Column([
+                                T(
+                                    "هوش مصنوعی آماده استفاده است",
+                                    size=16,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=Palette.TEXT,
+                                ),
+                                T(
+                                    "برای استفاده معمولاً نیازی به واردکردن "
+                                    "کلید API نیست.",
+                                    size=12,
+                                    color=Palette.MUTED,
+                                ),
+                            ], spacing=4, expand=True),
+                        ], spacing=12),
+                    ),
+                    surface_card(
+                        T("پیش از انتشار بازبینی کنید", size=14,
+                          weight=ft.FontWeight.W_600, color=Palette.TEXT),
                         T(
-                            "کلید از قبل تنظیم‌شده در این صفحه قابل "
-                            "جایگزینی نیست." if has_key else
-                            "برای استفاده از مسیرهای رایگان فعلی "
-                            "نیازی به کلید نیست.",
-                            size=11, color=Palette.MUTED,
+                            "پاسخ‌های هوش مصنوعی ممکن است اشتباه یا ناقص "
+                            "باشند. متن نهایی، لینک‌ها و اطلاعات حساس را "
+                            "پیش از انتشار در کانال بررسی کنید.",
+                            size=13, color=Palette.MUTED,
                         ),
-                        btn_primary("ذخیره",
-                                    lambda e: self.spawn(save())),
+                    ),
+                    surface_card(
+                        T("دسترسی و حریم خصوصی", size=14,
+                          weight=ft.FontWeight.W_600, color=Palette.TEXT),
+                        T(
+                            "متنی که برای تولید یا بازنویسی می‌فرستید برای "
+                            "پردازش به سرویس هوش مصنوعی ارسال می‌شود؛ "
+                            "اطلاعات محرمانه یا توکن ربات را در درخواست‌ها "
+                            "قرار ندهید.",
+                            size=13, color=Palette.MUTED,
+                        ),
+                    ),
+                    btn_primary(
+                        "گفت‌وگو با دستیار",
+                        lambda e: self.spawn(self.go("chat")),
                     ),
                 ], spacing=12),
                 padding=16,
@@ -2701,10 +2816,15 @@ class App:
             if not (cid.value or "").strip():
                 return self.toast("شناسه کانال لازم است", error=True)
             try:
-                await self.api.post("/channels", {
-                    "channel_id": cid.value.strip(),
+                existing = await self.api.get("/connections")
+                connection = existing[0] if existing else None
+                payload = {
+                    "value": cid.value.strip(),
                     "title": (title.value or "").strip() or cid.value.strip(),
-                })
+                }
+                if isinstance(connection, dict) and connection.get("id") is not None:
+                    payload["connection_id"] = connection["id"]
+                await self.api.post("/channels", payload)
                 self.toast("کانال اضافه شد")
                 self.page.pop_dialog()
                 self.channels = await self._safe_get("/channels", [])
@@ -2964,6 +3084,19 @@ async def main(page: ft.Page):
     page.services.append(prefs)
 
     app = App(page, loop, prefs)
+    if not app.api.online:
+        asyncio.create_task(app._local_schedule_loop())
+
+    def handle_keyboard_back(event):
+        key = str(getattr(event, "key", "") or "").lower()
+        event_type = str(getattr(event, "type", "") or "").lower()
+        if key in ("back", "escape", "browserback") and event_type in (
+            "", "keydown", "key-down"
+        ):
+            app.spawn(app.handle_back())
+
+    page.on_keyboard_event = handle_keyboard_back
+    page.on_view_pop = lambda event: app.spawn(app.handle_back())
     page.services.append(app.file_picker)
     page.services.append(app.url_launcher)
     page.on_platform_brightness_change = lambda e: (

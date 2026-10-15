@@ -1,17 +1,20 @@
 """Thin adapter over EitaaYar (names per the EitaaYar API PDF supplied by the owner; sendMessage `text` and
 getMe response shape still unverified against live responses). Limit: ~20 req/s per IP, so calls are throttled."""
 import os, re, time, asyncio, httpx
+from urllib.parse import urlparse
 
-BASE = os.getenv("EITAAYAR_BASE", "https://eitaayar.ir/api")
+BASE = os.getenv("EITAAYAR_BASE", "https://eitaayar.ir/api").rstrip("/")
 UNSUPPORTED = "این عملیات در API عمومی فعلی ایتایار در دسترس نیست."
 
 class EitaaError(Exception): pass
 
 def normalize_channel(raw: str) -> str:
-    raw = raw.strip()
+    raw = str(raw or "").strip()
     m = re.match(r"^(?:https?://)?(?:www\.)?eitaa\.com/([A-Za-z0-9_]+)/?$", raw)
-    if m: return m.group(1)
-    return raw.lstrip("@")
+    if m:
+        return m.group(1)
+    value = raw.lstrip("@")
+    return value if re.fullmatch(r"[A-Za-z0-9_+-]{1,200}", value) else ""
 
 def _scrub(msg: str, token: str) -> str:
     return msg.replace(token, "***")
@@ -23,9 +26,18 @@ async def _throttle():  # EitaaYar blocks the IP above ~20 req/s; stay well belo
     _last[0] = time.monotonic()
 
 async def _call(token: str, method: str, files=None, **data):
+    token = str(token or "").strip()
+    if (not token or any(ch in token for ch in "/?#\r\n\\")
+            or not re.fullmatch(r"[A-Za-z0-9:_-]{8,256}", token)):
+        raise EitaaError("توکن اتصال ایتایار معتبر نیست.")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,39}", method):
+        raise EitaaError("عملیات درخواستی ایتایار معتبر نیست.")
+    parsed = urlparse(BASE)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise EitaaError("نشانی سرویس ایتایار باید HTTPS معتبر باشد.")
     await _throttle()
     try:
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as c:
             r = await c.post(f"{BASE}/{token}/{method}", data=data, files=files)
         j = r.json()
     except Exception as e:

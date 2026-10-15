@@ -13,9 +13,10 @@ os.environ["MEDIA_DIR"] = f"{_test_dir.name}/media"
 
 from fastapi.testclient import TestClient
 
+from backend import auth
 from backend.db import (
     Channel, Connection, Delivery, Post, RemovalReminder, SchemaMigration,
-    Session, fernet,
+    Session, User, fernet,
 )
 from backend.main import app, deliver, _promote_due_reminders
 
@@ -52,6 +53,50 @@ class PostValidationTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.client_context.__exit__(None, None, None)
         _test_dir.cleanup()
+
+    def _headers_for_role(self, role, username):
+        with Session() as session:
+            user = User(
+                workspace_id=1,
+                username=username,
+                display_name=username,
+                pw_hash=auth.hash_pw("test-password-123"),
+                role=role,
+            )
+            session.add(user)
+            session.commit()
+            uid = user.id
+        return {"Authorization": f"Bearer {auth.make_token(uid)}"}
+
+    def test_analyst_cannot_create_posts(self):
+        headers = self._headers_for_role("analyst", "analyst-create-test")
+        response = self.client.post(
+            "/api/posts", headers=headers, json={"text": "must be blocked"}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_unmatched_write_routes_are_denied_to_non_owners(self):
+        headers = self._headers_for_role("editor", "editor-default-deny-test")
+        response = self.client.post(
+            "/api/unregistered-write-route", headers=headers, json={}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_editor_cannot_publish_posts(self):
+        headers = self._headers_for_role("editor", "editor-publish-test")
+        response = self.client.post(
+            "/api/posts/1/publish", headers=headers, json={}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_analytics_returns_exact_requested_date_window(self):
+        response = self.client.get("/api/analytics?days=7", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        days = response.json()["days"]
+        self.assertEqual(len(days), 7)
+        keys = [item["date"] for item in days]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(len(set(keys)), 7)
 
     def test_rejects_unknown_post_mode(self):
         response = self.client.post(

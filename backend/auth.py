@@ -13,7 +13,7 @@ the standard library, so this module can be unit-tested without pulling
 in FastAPI, SQLAlchemy or the rest of the application.
 """
 
-import os, hmac, hashlib, base64, json, time, secrets
+import os, hmac, hashlib, base64, json, time, secrets, re
 from urllib.parse import parse_qsl
 
 SECRET = os.environ["APP_SECRET_KEY"].encode()
@@ -109,6 +109,8 @@ def is_valid_role(role: str) -> bool:
 # ================================================================= password
 
 def hash_pw(pw: str) -> str:
+    if not isinstance(pw, str) or not 8 <= len(pw) <= 1024:
+        raise ValueError("Password length must be between 8 and 1024 characters")
     salt = secrets.token_bytes(16)
     return salt.hex() + ":" + hashlib.scrypt(
         pw.encode(), salt=salt, n=2**14, r=8, p=1
@@ -131,6 +133,9 @@ def verify_pw(pw: str, stored: str) -> bool:
 # ==================================================================== token
 
 def make_token(uid: int, ttl: int = 7 * 86400) -> str:
+    if not isinstance(uid, int) or uid <= 0:
+        raise ValueError("User id must be a positive integer")
+    ttl = min(max(int(ttl), 60), 30 * 86400)
     b = base64.urlsafe_b64encode(
         json.dumps({"u": uid, "e": int(time.time()) + ttl}).encode()
     ).decode()
@@ -138,6 +143,8 @@ def make_token(uid: int, ttl: int = 7 * 86400) -> str:
 
 
 def read_token(t: str):
+    if not isinstance(t, str) or len(t) > 2048:
+        return None
     try:
         b, sig = t.split(".", 1)
         if not hmac.compare_digest(
@@ -145,7 +152,14 @@ def read_token(t: str):
         ):
             return None
         d = json.loads(base64.urlsafe_b64decode(b))
-        return d["u"] if d["e"] > time.time() else None
+        if not isinstance(d, dict):
+            return None
+        uid, expires = d.get("u"), d.get("e")
+        if not isinstance(uid, int) or uid <= 0:
+            return None
+        if not isinstance(expires, (int, float)) or expires <= time.time():
+            return None
+        return uid
     except Exception:
         return None
 
@@ -159,9 +173,18 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = 86400):
     in production. Returns the user dict on success or ``None`` on any
     failure (missing signature, wrong signature, expired, malformed).
     """
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    if (not isinstance(init_data, str) or len(init_data) > 8192
+            or not isinstance(bot_token, str) or not bot_token):
+        return None
+    try:
+        items = parse_qsl(init_data, keep_blank_values=True, max_num_fields=100)
+    except ValueError:
+        return None
+    if len({key for key, _ in items}) != len(items):
+        return None
+    pairs = dict(items)
     h = pairs.pop("hash", None)
-    if not h:
+    if not h or not re.fullmatch(r"[0-9a-fA-F]{64}", h):
         return None
     check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
@@ -169,9 +192,15 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = 86400):
         hmac.new(key, check.encode(), hashlib.sha256).hexdigest(), h
     ):
         return None
-    if time.time() - int(pairs.get("auth_date", "0")) > max_age:
+    try:
+        auth_date = int(pairs.get("auth_date", "0"))
+    except (TypeError, ValueError):
+        return None
+    now = time.time()
+    if auth_date <= 0 or auth_date > now + 60 or now - auth_date > max_age:
         return None
     try:
-        return json.loads(pairs.get("user", "{}"))
-    except Exception:
+        user = json.loads(pairs.get("user", "{}"))
+        return user if isinstance(user, dict) else None
+    except (TypeError, ValueError):
         return None

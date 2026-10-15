@@ -60,3 +60,18 @@ class EitaaAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["view_to_delete"], 5)
         self.assertEqual(kwargs["reply_to_message_id"], 7)
         self.assertEqual(kwargs["files"]["file"][0], "test.pdf")
+
+
+    def test_normalize_channel_accepts_links_usernames_and_numeric_ids(self):
+        self.assertEqual(eitaa.normalize_channel("https://eitaa.com/my_channel"), "my_channel")
+        self.assertEqual(eitaa.normalize_channel("@my_channel"), "my_channel")
+        self.assertEqual(eitaa.normalize_channel("-10012345"), "-10012345")
+
+    def test_normalize_channel_rejects_path_injection_and_empty_values(self):
+        self.assertEqual(eitaa.normalize_channel(""), "")
+        self.assertEqual(eitaa.normalize_channel("../etc/passwd"), "")
+        self.assertEqual(eitaa.normalize_channel("https://evil.example/x"), "")
+
+    async def test_call_rejects_invalid_token_before_network_access(self):
+        with self.assertRaises(eitaa.EitaaError):
+            await eitaa._call("bad/token", "getMe")

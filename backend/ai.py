@@ -29,6 +29,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import httpx
+from urllib.parse import urlparse
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,26 @@ def _clean_error(message: str, fallback: str) -> str:
 
 # ================================================================ providers
 
+def _validate_endpoint(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    local_http = parsed.scheme == "http" and parsed.hostname in {
+        "localhost", "127.0.0.1", "::1",
+    }
+    if (not parsed.hostname or (parsed.scheme != "https" and not local_http)
+            or parsed.username or parsed.password or parsed.fragment):
+        raise AIError("نشانی سرویس هوش مصنوعی امن یا معتبر نیست.")
+    return endpoint
+
+
+def _validate_prompt(system: str, user: str) -> None:
+    if not isinstance(system, str) or not isinstance(user, str):
+        raise AIError("درخواست هوش مصنوعی معتبر نیست.")
+    if not user.strip():
+        raise AIError("متن درخواست هوش مصنوعی خالی است.")
+    if len(system) + len(user) > 24_000:
+        raise AIError("متن درخواست هوش مصنوعی بیش از حد طولانی است.")
+
+
 class AIProvider(ABC):
     name = "base"
     default_model = ""
@@ -104,6 +125,8 @@ class GroqProvider(AIProvider):
     )
 
     async def complete(self, system: str, user: str) -> str:
+        _validate_prompt(system, user)
+        _validate_endpoint(self.endpoint)
         candidates = list(self.models)
         random.shuffle(candidates)
         failures: list[AIError] = []
@@ -174,7 +197,10 @@ class GroqProvider(AIProvider):
         if not isinstance(content, str) or not content.strip():
             logger.info("Groq returned empty content for model=%s", model)
             raise AIError("پاسخ خالی از سرویس هوش مصنوعی.")
-        return content.strip()
+        content = content.strip()
+        if len(content) > 50_000:
+            raise AIError("پاسخ هوش مصنوعی بیش از حد بزرگ است.")
+        return content
 
 
 class AnthropicProvider(AIProvider):
@@ -188,6 +214,8 @@ class AnthropicProvider(AIProvider):
     api_version = "2023-06-01"
 
     async def complete(self, system: str, user: str) -> str:
+        _validate_prompt(system, user)
+        _validate_endpoint(self.endpoint)
         payload = {
             "model": self.model,
             "max_tokens": 1500,
@@ -228,6 +256,8 @@ class AnthropicProvider(AIProvider):
             raise AIError("پاسخ نامعتبر از سرویس هوش مصنوعی.") from exc
         if not result:
             raise AIError("پاسخ خالی از سرویس هوش مصنوعی.")
+        if len(result) > 50_000:
+            raise AIError("پاسخ هوش مصنوعی بیش از حد بزرگ است.")
         return result
 
 
