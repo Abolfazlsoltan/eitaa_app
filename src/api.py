@@ -291,7 +291,7 @@ class Api:
             raise ApiError("متن درخواست خیلی طولانی است؛ آن را کوتاه‌تر کنید.")
         if language not in ("fa", "en", "ar"):
             raise ApiError("زبان خروجی پشتیبانی نمی‌شود.")
-        if tone not in ("neutral", "formal", "casual", "friendly", "professional"):
+        if tone not in ("neutral", "formal", "friendly", "news"):
             raise ApiError("لحن انتخاب‌شده معتبر نیست.")
         if length not in ("short", "medium", "long"):
             raise ApiError("اندازهٔ پاسخ انتخاب‌شده معتبر نیست.")
