@@ -112,6 +112,29 @@ class ClientFeatureTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_local_scheduler_records_unexpected_publish_failure(self):
+        async def run():
+            await self.api._save("posts", [{
+                "id": 5,
+                "title": "due post",
+                "text": "body",
+                "status": "scheduled",
+                "scheduled_at": "2000-01-01T00:00:00",
+                "deliveries": [{"channel_id": 1, "status": "scheduled"}],
+            }])
+            self.api._publish = AsyncMock(
+                side_effect=RuntimeError("simulated unexpected failure")
+            )
+
+            self.assertEqual(await self.api.process_due_scheduled(), 1)
+            posts = await self.api.get("/posts")
+            self.assertEqual(posts[0]["status"], "failed")
+            self.assertEqual(posts[0]["deliveries"][0]["status"], "failed")
+            self.assertIn("وضعیت کانال", posts[0]["deliveries"][0]["error"])
+            self.assertEqual(await self.api.process_due_scheduled(), 0)
+
+        asyncio.run(run())
+
     def test_profile_dialog_dict_persists_display_name(self):
         async def run():
             saved = await self.api.save_profile({
