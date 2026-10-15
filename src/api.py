@@ -228,6 +228,41 @@ class Api:
             await self._client.aclose()
             self._client = None
 
+    async def process_due_scheduled(self) -> int:
+        """Publish due local posts while the app process is running."""
+        if self.online:
+            return 0
+        posts = await self._load("posts", [])
+        now_utc = _utcnow_naive()
+        due = []
+        for post in posts:
+            if post.get("status") != "scheduled":
+                continue
+            raw = post.get("scheduled_at")
+            if not isinstance(raw, str):
+                continue
+            try:
+                scheduled = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if scheduled.tzinfo is not None:
+                    scheduled = scheduled.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            except ValueError:
+                continue
+            if scheduled <= now_utc:
+                post["status"] = "queued"
+                for delivery in post.get("deliveries", []):
+                    if delivery.get("status") == "scheduled":
+                        delivery["status"] = "queued"
+                due.append(post)
+        if not due:
+            return 0
+        # Persist the claim before network I/O to avoid duplicate sends if
+        # the app is interrupted while publishing.
+        await self._save("posts", posts)
+        for post in due:
+            await self._publish(post)
+        await self._save("posts", posts)
+        return len(due)
+
     # -------------------------------------------------------- public API ---
     async def get(self, path: str, params: dict | None = None) -> Any:
         return await self._dispatch("GET", path, None, params=params)
