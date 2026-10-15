@@ -2060,13 +2060,9 @@ class App:
             try:
                 if post_id is not None:
                     await self.api.put(f"/posts/{post_id}", payload)
-                    await self.api.post(f"/posts/{post_id}/publish")
                 else:
-                    created = await self.api.post("/posts", payload)
-                    pid = created.get("id") if isinstance(created, dict) else None
-                    if pid:
-                        await self.api.post(f"/posts/{pid}/publish")
-                self.toast("در صف انتشار قرار گرفت")
+                    await self.api.post("/posts", payload)
+                self.toast("درخواست انتشار ثبت شد؛ وضعیت را در فهرست پست‌ها ببینید.")
                 await self.go("posts")
             except ApiError as e:
                 self.toast(str(e), error=True)
