@@ -2076,10 +2076,10 @@ class App:
                     ai_row,
                     T("کانال‌ها", size=13,
                       weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                    *channel_checks if channel_checks else [
+                    *(channel_checks or [
                         T("کانالی ثبت نشده — از تنظیمات اضافه کنید",
                           size=12, color=Palette.MUTED)
-                    ],
+                    ]),
                     T("زمان‌بندی (اختیاری)", size=13,
                       weight=ft.FontWeight.W_600, color=Palette.TEXT),
                     ft.Row([date_f, time_f], spacing=10),
