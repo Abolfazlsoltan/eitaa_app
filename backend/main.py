@@ -1529,7 +1529,9 @@ RULES = [
     (("POST",), r"^/api/removal-reminders/\d+/(cancel|reschedule)", "edit"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
+    (("POST",), r"^/api/posts$", "edit"),
     (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
+    (("POST",), r"^/api/posts/\d+/publish$", "publish"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
     (("POST",), r"^/api/posts/\d+/(approve|reject)", "approve"),
     (("POST", "DELETE"), r"^/api/(templates|media|automations|ai)", "edit"),
@@ -1552,21 +1554,39 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "ابتدا وارد شوید."}, status_code=401)
     request.state.user = u
 
+    matched_rule = False
     for methods, rx, perm in RULES:
-        if (request.method in methods and re.match(rx, path)
-                and not auth.can(u.role, perm)):
-            return JSONResponse(
-                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
-                status_code=403)
+        if request.method in methods and re.match(rx, path):
+            matched_rule = True
+            if not auth.can(u.role, perm):
+                return JSONResponse(
+                    {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                    status_code=403,
+                )
+            break
+
+    # Non-owner write operations must match an explicit permission rule.
+    # This prevents new endpoints from accidentally bypassing role checks.
+    if (not matched_rule
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not auth.can(u.role, "*")):
+        return JSONResponse(
+            {"detail": "برای این عملیات مجوز مشخصی تعریف نشده است."},
+            status_code=403,
+        )
     return await call_next(request)
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv(
-        "CORS_ORIGINS",
-        "tauri://localhost,http://tauri.localhost,http://localhost:5173",
-    ).split(","),
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "tauri://localhost,http://tauri.localhost,http://localhost:5173",
+        ).split(",")
+        if origin.strip()
+    ],
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
