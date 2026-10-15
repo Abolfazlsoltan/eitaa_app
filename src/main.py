@@ -3085,6 +3085,17 @@ async def main(page: ft.Page):
     app = App(page, loop, prefs)
     if not app.api.online:
         asyncio.create_task(app._local_schedule_loop())
+
+    def handle_keyboard_back(event):
+        key = str(getattr(event, "key", "") or "").lower()
+        event_type = str(getattr(event, "type", "") or "").lower()
+        if key in ("back", "escape", "browserback") and event_type in (
+            "", "keydown", "key-down"
+        ):
+            app.spawn(app.handle_back())
+
+    page.on_keyboard_event = handle_keyboard_back
+    page.on_view_pop = lambda event: app.spawn(app.handle_back())
     page.services.append(app.file_picker)
     page.services.append(app.url_launcher)
     page.on_platform_brightness_change = lambda e: (
