@@ -10,11 +10,11 @@ class EitaaError(Exception): pass
 
 def normalize_channel(raw: str) -> str:
     raw = str(raw or "").strip()
-    m = re.match(r"^(?:https?://)?(?:www\\.)?eitaa\\.com/([A-Za-z0-9_]+)/?$", raw)
+    m = re.match(r"^(?:https?://)?(?:www\.)?eitaa\.com/([A-Za-z0-9_]+)/?$", raw)
     if m:
         return m.group(1)
     value = raw.lstrip("@")
-    return value if re.fullmatch(r"[A-Za-z0-9_+\\-]{1,200}", value) else ""
+    return value if re.fullmatch(r"[A-Za-z0-9_+-]{1,200}", value) else ""
 
 def _scrub(msg: str, token: str) -> str:
     return msg.replace(token, "***")
@@ -27,7 +27,7 @@ async def _throttle():  # EitaaYar blocks the IP above ~20 req/s; stay well belo
 
 async def _call(token: str, method: str, files=None, **data):
     token = str(token or "").strip()
-    if (not token or any(ch in token for ch in "/?#\\r\\n")
+    if (not token or any(ch in token for ch in "/?#\r\n\\")
             or not re.fullmatch(r"[A-Za-z0-9:_-]{8,256}", token)):
         raise EitaaError("توکن اتصال ایتایار معتبر نیست.")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,39}", method):
