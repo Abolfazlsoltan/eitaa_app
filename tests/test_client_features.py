@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from api import Api, ApiError
+from api import Api, ApiError, normalize_channel
 
 
 class MemoryStorage:
@@ -34,6 +34,16 @@ class ClientFeatureTests(unittest.TestCase):
         self.storage = MemoryStorage()
         self.api = Api(self.storage)
         self.api.base = ""
+
+    def test_channel_normalization_rejects_malformed_identifiers(self):
+        self.assertEqual(
+            normalize_channel("https://eitaa.com/sample_channel"),
+            "sample_channel",
+        )
+        self.assertEqual(normalize_channel("@sample_channel"), "sample_channel")
+        self.assertEqual(normalize_channel("-10012345"), "-10012345")
+        self.assertEqual(normalize_channel("../invalid"), "")
+        self.assertEqual(normalize_channel(""), "")
 
     def test_local_draft_can_be_updated_and_deleted(self):
         async def run():
