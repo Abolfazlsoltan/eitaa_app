@@ -1259,19 +1259,22 @@ class Api:
             "view_to_delete": body.get("view_to_delete"),
             "reply_to_message_id": body.get("reply_to_message_id"),
             "media_id": body.get("media_id"),
-            "scheduled_at": None,
+            "scheduled_at": scheduled_at.isoformat(timespec="seconds")
+                if scheduled_at else None,
             "deliveries": [
                 {
                     "id": post_id * 1000 + i,
                     "channel_id": cid,
-                    "status": "draft" if mode == "draft" else "queued",
+                    "status": {"draft": "draft", "now": "queued",
+                                "schedule": "scheduled"}[mode],
                     "error": "",
                 }
                 for i, cid in enumerate(channel_ids)
             ],
         })
+        post["status"] = {"draft": "draft", "now": "queued",
+                          "schedule": "scheduled"}[mode]
         if mode == "now":
-            post["status"] = "queued"
             await self._publish(post)
         await self._save("posts", posts)
         return {"id": post_id, "status": post["status"]}
