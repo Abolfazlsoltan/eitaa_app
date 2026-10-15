@@ -259,7 +259,25 @@ class Api:
         # the app is interrupted while publishing.
         await self._save("posts", posts)
         for post in due:
-            await self._publish(post)
+            try:
+                await self._publish(post)
+            except Exception:
+                # A network call may have reached Eitaa even if the client
+                # then failed. Do not auto-retry: that could duplicate a post.
+                # Record a visible failure for manual review instead of
+                # leaving the item stuck in "queued" forever.
+                logger.exception(
+                    "Scheduled post %s failed unexpectedly",
+                    post.get("id"),
+                )
+                post["status"] = "failed"
+                for delivery in post.get("deliveries", []):
+                    if delivery.get("status") in ("queued", "sending"):
+                        delivery["status"] = "failed"
+                        delivery["error"] = (
+                            "ارسال زمان‌بندی‌شده با خطا مواجه شد؛ "
+                            "وضعیت کانال را بررسی کنید."
+                        )
         await self._save("posts", posts)
         return len(due)
 
