@@ -46,8 +46,8 @@ class UISmokeTests(unittest.TestCase):
             ):
                 await self.app.go("new")
 
-            self.assertIsInstance(self.app.body.content, ft.Container)
-            self.assertIsInstance(self.app.body.content.content, ft.Column)
+            self.assertIsInstance(self.app.body.content, ft.Column)
+            self.assertTrue(self._find_controls(self.app.body.content, ft.TextField))
 
         self.loop.run_until_complete(run())
 
@@ -77,7 +77,7 @@ class UISmokeTests(unittest.TestCase):
                             await self.app.go(view, 1)
                         else:
                             await self.app.go(view)
-                    self.assertIsInstance(self.app.body.content, ft.Container)
+                    self.assertIsNotNone(self.app.body.content)
 
         self.loop.run_until_complete(run())
 
@@ -95,13 +95,15 @@ class UISmokeTests(unittest.TestCase):
         async def run():
             await self.app.api.bootstrap()
             view = await self.app.v_chat()
-            self.assertIsInstance(view, ft.Container)
+            self.assertIsInstance(view, ft.Column)
             self.assertEqual(
                 len(self._find_controls(view, ft.TextField)), 1
             )
-            dropdowns = self._find_controls(view, ft.Dropdown)
-            self.assertEqual(len(dropdowns), 1)
-            self.assertEqual(dropdowns[0].value, "create")
+            self.assertEqual(self._find_controls(view, ft.Dropdown), [])
+            self.assertTrue(any(
+                control.icon == ft.Icons.SEND_ROUNDED
+                for control in self._find_controls(view, ft.IconButton)
+            ))
 
         self.loop.run_until_complete(run())
 
@@ -121,7 +123,7 @@ class UISmokeTests(unittest.TestCase):
                 control for control in self._find_controls(
                     view, ft.IconButton
                 )
-                if control.icon == ft.Icons.ARROW_UPWARD_ROUNDED
+                if control.icon == ft.Icons.SEND_ROUNDED
             )
             prompt.value = "یک پست معرفی محصول بساز"
             await send.on_click(None)
@@ -147,13 +149,14 @@ class UISmokeTests(unittest.TestCase):
         async def run():
             await self.app.api.bootstrap()
             view = await self.app.v_new()
-            dropdowns = self._find_controls(view, ft.Dropdown)
-            callbacks = [
-                control.on_select
-                for control in dropdowns
-                if control.on_select is not None
+            self.assertEqual(self._find_controls(view, ft.Dropdown), [])
+            labels = [
+                control.value
+                for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
             ]
-            self.assertEqual(len(callbacks), 3)
+            self.assertTrue(any("بازنویسی" in label for label in labels))
+            self.assertTrue(any("کوتاه" in label for label in labels))
 
         self.loop.run_until_complete(run())
 
@@ -161,7 +164,7 @@ class UISmokeTests(unittest.TestCase):
         async def run():
             await self.app.api.bootstrap()
             visible = await self.app.v_ai_settings()
-            self.assertIsInstance(visible, ft.Container)
+            self.assertIsInstance(visible, ft.Column)
             self.assertEqual(
                 self._find_controls(visible, ft.Dropdown), []
             )
