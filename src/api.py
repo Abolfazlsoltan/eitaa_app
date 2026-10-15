@@ -165,12 +165,13 @@ _SAFE_ERRORS = {
 
 
 def normalize_channel(raw: str) -> str:
-    """Turn a link, @username or id into a bare channel identifier."""
-    raw = (raw or "").strip()
-    m = _CHANNEL_RE.match(raw)
-    if m:
-        return m.group(1)
-    return raw.lstrip("@")
+    """Normalize an Eitaa link, @username, or numeric channel ID safely."""
+    raw = str(raw or "").strip()
+    match = _CHANNEL_RE.match(raw)
+    if match:
+        return match.group(1)
+    value = raw.lstrip("@")
+    return value if re.fullmatch(r"[A-Za-z0-9_+-]{1,200}", value) else ""
 
 
 def _utcnow_naive() -> dt.datetime:
