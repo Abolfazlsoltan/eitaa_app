@@ -107,7 +107,7 @@ jobs:
             echo "::warning::No keystore secret found - the APK will be signed with the debug key."
           fi
 
-          flet build apk --verbose --yes
+          flet build apk --verbose --yes --build-number "$GITHUB_RUN_NUMBER"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
