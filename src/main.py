@@ -710,7 +710,31 @@ class App:
     async def go_nav(self, index: int):
         await self.go(NAV_VIEWS[index])
 
+    async def handle_back(self):
+        """Navigate inside the app instead of unexpectedly closing it."""
+        if self.view in NAV_VIEWS:
+            if self.view != "home":
+                await self.go("home")
+            else:
+                self.toast("الان در صفحه اصلی هستی؛ برای خروج از برنامه از گزینه خروج استفاده کن.")
+            return
+        back_targets = {
+            "new": "posts",
+            "chat": "home",
+            "channel_history": "posts",
+            "reminders": "settings",
+            "ai_settings": "settings",
+            "auth": "auth",
+            "onboarding": "onboarding",
+        }
+        target = back_targets.get(self.view, self._last_primary_view)
+        if target == self.view and target not in NAV_VIEWS:
+            target = "home"
+        await self.go(target)
+
     async def go(self, name: str, *args):
+        if name in NAV_VIEWS:
+            self._last_primary_view = name
         self.view = name
         self.page.floating_action_button = self._fab_for(name)
         # The bottom bar is a tab bar; sub-screens (e.g. "new") hide it.
