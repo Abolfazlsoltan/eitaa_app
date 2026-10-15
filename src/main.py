@@ -1805,8 +1805,11 @@ class App:
                                 color=ft.Colors.with_opacity(0.06, "#0F172A"),
                                 offset=ft.Offset(0, 3),
                             ) if not is_user else None,
-                            width=min(320, self.page.width * 0.82)
-                            if self.page.width else 280,
+                            width=(
+                                min(320, self.page.width * 0.82)
+                                if isinstance(self.page.width, (int, float))
+                                and self.page.width > 0 else 280
+                            ),
                         ),
                     ], alignment=(
                         ft.MainAxisAlignment.END if is_user
@@ -2364,43 +2367,13 @@ class App:
         await self.go("ai_settings")
 
     async def v_ai_settings(self):
-        settings = await self.api.ai_settings()
-        provider = settings.get("provider", "groq")
-        model = settings.get("model", "")
-        has_key = settings.get("has_key", False)
-
-        provider_dd = ft.Dropdown(
-            label="ارائه‌دهنده",
-            value=provider,
-            options=[
-                ft.dropdown.Option("groq", "Groq"),
-                ft.dropdown.Option("openai", "OpenAI"),
-                ft.dropdown.Option("gemini", "Gemini"),
-                ft.dropdown.Option("anthropic", "Anthropic"),
-            ],
-            border_radius=14,
-        )
-        model_f = tf("مدل", value=model)
-        key_f = tf("کلید API (در صورت نیاز)", password=True,
-                   can_reveal_password=True)
-        base_f = tf("Base URL (اختیاری برای OpenAI-compatible)")
-
-        async def save(_=None):
-            try:
-                await self.api.save_ai_settings(
-                    provider_dd.value or "groq",
-                    (model_f.value or "").strip(),
-                    (key_f.value or "").strip(),
-                    (base_f.value or "").strip(),
-                )
-                self.toast("تنظیمات ذخیره شد")
-                await self.go("settings")
-            except ApiError as e:
-                self.toast(str(e), error=True)
-
+        # The current app AI path uses the built-in anonymous provider.
+        # Avoid exposing legacy provider/key controls that are not used by
+        # Api.ai(), which would mislead users into thinking they take effect.
         return ft.Column([
             self.gradient_header(
-                "دستیار AI",
+                "دستیار هوشمند",
+                subtitle="تنظیمات و راهنمای استفاده",
                 actions=[
                     self._header_icon(
                         ft.Icons.ARROW_FORWARD,
@@ -2411,19 +2384,63 @@ class App:
             ft.Container(
                 content=ft.Column([
                     surface_card(
-                        provider_dd,
-                        model_f,
-                        key_f,
-                        base_f,
+                        ft.Row([
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.AUTO_AWESOME,
+                                    color="#FFFFFF",
+                                    size=24,
+                                ),
+                                width=52,
+                                height=52,
+                                border_radius=16,
+                                alignment=ft.Alignment(0, 0),
+                                gradient=ft.LinearGradient(
+                                    begin=ft.Alignment.TOP_LEFT,
+                                    end=ft.Alignment.BOTTOM_RIGHT,
+                                    colors=[Palette.ACCENT, Palette.PRIMARY],
+                                ),
+                            ),
+                            ft.Column([
+                                T(
+                                    "هوش مصنوعی آماده استفاده است",
+                                    size=16,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=Palette.TEXT,
+                                ),
+                                T(
+                                    "برای استفاده معمولاً نیازی به واردکردن "
+                                    "کلید API نیست.",
+                                    size=12,
+                                    color=Palette.MUTED,
+                                ),
+                            ], spacing=4, expand=True),
+                        ], spacing=12),
+                    ),
+                    surface_card(
+                        T("پیش از انتشار بازبینی کنید", size=14,
+                          weight=ft.FontWeight.W_600, color=Palette.TEXT),
                         T(
-                            "کلید از قبل تنظیم‌شده در این صفحه قابل "
-                            "جایگزینی نیست." if has_key else
-                            "برای استفاده از مسیرهای رایگان فعلی "
-                            "نیازی به کلید نیست.",
-                            size=11, color=Palette.MUTED,
+                            "پاسخ‌های هوش مصنوعی ممکن است اشتباه یا ناقص "
+                            "باشند. متن نهایی، لینک‌ها و اطلاعات حساس را "
+                            "پیش از انتشار در کانال بررسی کنید.",
+                            size=13, color=Palette.MUTED,
                         ),
-                        btn_primary("ذخیره",
-                                    lambda e: self.spawn(save())),
+                    ),
+                    surface_card(
+                        T("دسترسی و حریم خصوصی", size=14,
+                          weight=ft.FontWeight.W_600, color=Palette.TEXT),
+                        T(
+                            "متنی که برای تولید یا بازنویسی می‌فرستید برای "
+                            "پردازش به سرویس هوش مصنوعی ارسال می‌شود؛ "
+                            "اطلاعات محرمانه یا توکن ربات را در درخواست‌ها "
+                            "قرار ندهید.",
+                            size=13, color=Palette.MUTED,
+                        ),
+                    ),
+                    btn_primary(
+                        "گفت‌وگو با دستیار",
+                        lambda e: self.spawn(self.go("chat")),
                     ),
                 ], spacing=12),
                 padding=16,
