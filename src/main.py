@@ -712,6 +712,9 @@ class App:
 
     async def handle_back(self):
         """Navigate inside the app instead of unexpectedly closing it."""
+        if self.view in ("auth", "onboarding"):
+            self.toast("برای ادامه، همین مرحله را کامل کن.")
+            return
         if self.view in NAV_VIEWS:
             if self.view != "home":
                 await self.go("home")
@@ -724,8 +727,6 @@ class App:
             "channel_history": "posts",
             "reminders": "settings",
             "ai_settings": "settings",
-            "auth": "auth",
-            "onboarding": "onboarding",
         }
         target = back_targets.get(self.view, self._last_primary_view)
         if target == self.view and target not in NAV_VIEWS:
