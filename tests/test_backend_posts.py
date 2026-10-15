@@ -89,6 +89,15 @@ class PostValidationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
+    def test_analytics_returns_exact_requested_date_window(self):
+        response = self.client.get("/api/analytics?days=7", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        days = response.json()["days"]
+        self.assertEqual(len(days), 7)
+        keys = [item["date"] for item in days]
+        self.assertEqual(keys, sorted(keys))
+        self.assertEqual(len(set(keys)), 7)
+
     def test_rejects_unknown_post_mode(self):
         response = self.client.post(
             "/api/posts",
