@@ -102,7 +102,7 @@ async def send_file(
     token, chat_id, path, filename, caption="", title="", silent=False,
     pin=False, view_to_delete=None, reply_to_message_id=None,
 ):
-    p = dict(chat_id=chat_id, caption=caption)
+    p = dict(chat_id=chat_id, caption=markdown_to_html(caption), parse_mode="HTML")
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
