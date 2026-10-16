@@ -29,6 +29,12 @@ class MarkdownPublishingTests(unittest.TestCase):
         self.assertEqual(_markdown_to_eitaa_html(source), expected)
         self.assertEqual(markdown_to_html(source), expected)
 
+    def test_link_quotes_cannot_break_html_attributes(self):
+        source = '[پیوند](https://example.com/" onclick="bad)'
+        expected = '<a href="https://example.com/&quot; onclick=&quot;bad">پیوند</a>'
+        self.assertEqual(_markdown_to_eitaa_html(source), expected)
+        self.assertEqual(markdown_to_html(source), expected)
+
     def test_links_and_lists(self):
         source = "- مورد اول\n[سایت](https://example.com)"
         expected = "• مورد اول\n<a href=\"https://example.com\">سایت</a>"
