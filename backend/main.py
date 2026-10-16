@@ -1551,7 +1551,9 @@ RULES = [
     (("POST",), r"^/api/posts/\d+/publish$", "publish"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
     (("POST",), r"^/api/posts/\d+/(approve|reject)", "approve"),
-    (("POST", "DELETE"), r"^/api/(templates|media|automations|ai)", "edit"),
+    (("POST", "DELETE"), r"^/api/(templates|media|ai)", "edit"),
+    (("POST", "DELETE"), r"^/api/automations(?:/\d+)?$", "edit"),
+    (("POST",), r"^/api/automations/\d+/toggle$", "edit"),
 ]
 
 
@@ -1571,8 +1573,21 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "ابتدا وارد شوید."}, status_code=401)
     request.state.user = u
 
-    # POST /api/posts chooses its permission from the submitted mode inside
-    # create_post(): drafts require "edit", while immediate/scheduled posts
+    # Running an automation may create an approval-pending post or publish
+    # immediately. Allow editors and publishers to reach the endpoint; the
+    # endpoint itself enforces the extra publish permission when approval is
+    # disabled. The broad automation-management rule intentionally excludes
+    # this route so it cannot reject publishers before that check.
+    matched_rule = False
+    if request.method == "POST" and re.fullmatch(r"/api/automations/\\d+/run", path):
+        if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
+            return JSONResponse(
+                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                status_code=403,
+            )
+        matched_rule = True
+
+    # POST /api/posts chooses its permission from the submitted mode inside    # create_post(): drafts require "edit", while immediate/scheduled posts
     # require "publish". The middleware must allow either capability to reach
     # that endpoint-level check; otherwise publishers are blocked before it.
     matched_rule = False
