@@ -2003,6 +2003,9 @@ class App:
                 pass
             rebuild()
 
+        # Enter/IME send should behave exactly like tapping the send icon.
+        prompt.on_submit = lambda e: self.spawn(send())
+
         async def save_as_draft(_=None):
             if not self.chat_messages:
                 return self.toast("پیامی برای ذخیره نیست", error=True)
@@ -3227,11 +3230,9 @@ async def main(page: ft.Page):
             app.spawn(app.handle_back())
 
     def handle_view_pop(event):
-        # Keep the active app view mounted; route the hardware/back gesture
-        # through the app's own screen map instead of letting Android exit.
-        if len(page.views) > 1:
-            popped = page.views.pop()
-            page.views.append(popped)
+        # The active view is intentionally retained: this app swaps its body
+        # rather than creating one Flet View per logical screen. The Android
+        # back gesture must navigate through the app, not pop the root view.
         app.spawn(app.handle_back())
 
     page.on_keyboard_event = handle_keyboard_back
