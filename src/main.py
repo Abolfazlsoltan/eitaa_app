@@ -2155,25 +2155,39 @@ class App:
                 return self.toast("متنی برای پردازش وارد کنید", error=True)
             ai_busy["running"] = True
             ai_status.visible = True
+            previous_body = body_f.value or ""
+            stream_state = {"started": False}
             self.page.update()
-            try:
-                result = await self.api.ai(action, src)
-                # Keep the generated text readable as it is revealed rather
-                # than replacing the whole editor in one sudden jump.
-                body_f.value = ""
+
+            def on_chunk(chunk: str):
+                if not stream_state["started"]:
+                    body_f.value = ""
+                    stream_state["started"] = True
+                body_f.value = (body_f.value or "") + chunk
                 _refresh_preview()
-                chunk_size = 48
-                for end in range(chunk_size, len(result), chunk_size):
-                    body_f.value = result[:end]
+
+            try:
+                result = await self.api.ai(action, src, on_chunk=on_chunk)
+                if not stream_state["started"]:
+                    # Fallback for providers or test clients without streaming.
+                    body_f.value = ""
                     _refresh_preview()
-                    await asyncio.sleep(0.02)
+                    chunk_size = 48
+                    for end in range(chunk_size, len(result), chunk_size):
+                        body_f.value = result[:end]
+                        _refresh_preview()
+                        await asyncio.sleep(0.02)
                 body_f.value = result
                 _refresh_preview()
                 self.toast("آماده شد")
             except ApiError as e:
+                body_f.value = previous_body
+                _refresh_preview()
                 self.toast(str(e), error=True)
             except Exception:
                 logger.exception("AI composer action failed")
+                body_f.value = previous_body
+                _refresh_preview()
                 self.toast("ارتباط با هوش مصنوعی ناموفق بود؛ متن قبلی حفظ شد.", error=True)
             finally:
                 ai_busy["running"] = False
