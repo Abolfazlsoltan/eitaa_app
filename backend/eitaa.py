@@ -17,7 +17,7 @@ def markdown_to_html(value: str) -> str:
     import html
     import re
 
-    source = html.escape(str(value or ""), quote=False)
+    source = html.escape(str(value or ""), quote=True)
     code_blocks = []
 
     def hold_code(match):
