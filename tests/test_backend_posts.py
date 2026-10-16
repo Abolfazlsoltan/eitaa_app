@@ -18,7 +18,7 @@ from backend.db import (
     Channel, Connection, Delivery, Post, RemovalReminder, SchemaMigration,
     Session, User, fernet,
 )
-from backend.main import app, deliver, _promote_due_reminders
+from backend.main import app, deliver, _promote_due_reminders, _refresh_post
 
 
 class PostValidationTests(unittest.TestCase):
@@ -146,6 +146,29 @@ class PostValidationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "draft")
+
+    def test_mixed_delivery_results_are_reported_as_partial(self):
+        with Session() as session:
+            post = Post(title="partial test", text="body", status="sending")
+            session.add(post)
+            session.flush()
+            session.add_all([
+                Delivery(
+                    post_id=post.id, channel_id=self.channel_id,
+                    idem_key=f"{post.id}:partial-success", status="published",
+                ),
+                Delivery(
+                    post_id=post.id, channel_id=self.channel_id,
+                    idem_key=f"{post.id}:partial-failure", status="failed",
+                ),
+            ])
+            post_id = post.id
+            session.commit()
+
+        with Session() as session:
+            _refresh_post(session, post_id)
+            session.commit()
+            self.assertEqual(session.get(Post, post_id).status, "partial")
 
     def test_post_stores_supported_reply_and_view_delete_options(self):
         response = self.client.post(

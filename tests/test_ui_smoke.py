@@ -201,6 +201,103 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_posts_view_warns_when_loading_fails_instead_of_showing_empty_only(self):
+        async def run():
+            async def get(path):
+                if path == "/posts":
+                    raise ApiError("simulated connection failure")
+                if path == "/channels":
+                    return []
+                return {}
+
+            with patch.object(self.app.api, "get", new=AsyncMock(side_effect=get)):
+                view = await self.app.v_posts()
+
+            labels = [
+                control.value
+                for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertTrue(any(
+                "اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد" in label
+                for label in labels
+            ))
+            button_labels = [
+                control.content for control in self._find_controls(view, ft.TextButton)
+                if isinstance(control.content, str)
+            ]
+            self.assertTrue(any("تلاش دوباره" in label for label in button_labels))
+            self.assertIn("/posts", self.app._api_read_errors)
+
+        self.loop.run_until_complete(run())
+
+    def test_channel_history_includes_posts_read_from_public_eitaa_page(self):
+        async def run():
+            self.app.channels = [{
+                "id": 7, "title": "کانال نمونه", "chat_id": "sample_channel"
+            }]
+
+            async def get(path, params=None):
+                if path == "/history":
+                    return []
+                if path == "/history/public":
+                    return [{
+                        "id": "eitaa:sample_channel:123",
+                        "source_post_id": 123,
+                        "source_url": "https://eitaa.com/sample_channel/123",
+                        "source": "eitaa_public",
+                        "is_external": True,
+                        "text": "این یک پست قدیمی کانال است",
+                        "created_at": "2026-10-15T10:00:00+00:00",
+                        "deliveries": [],
+                    }]
+                return []
+
+            with patch.object(self.app.api, "get", new=AsyncMock(side_effect=get)):
+                view = await self.app.v_channel_history(7)
+
+            labels = [
+                control.value for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertTrue(any("این یک پست قدیمی کانال است" in x for x in labels))
+            self.assertTrue(any("پست دریافت‌شده از کانال ایتا" in x for x in labels))
+
+        self.loop.run_until_complete(run())
+
+    def test_channel_history_shows_warning_when_public_history_cannot_load(self):
+        async def run():
+            self.app.channels = [{
+                "id": 7, "title": "کانال نمونه", "chat_id": "sample_channel"
+            }]
+
+            async def get(path, params=None):
+                if path == "/history":
+                    return []
+                if path == "/history/public":
+                    raise ApiError("public page unavailable")
+                return []
+
+            with patch.object(self.app.api, "get", new=AsyncMock(side_effect=get)):
+                view = await self.app.v_channel_history(7)
+
+            labels = [
+                control.value for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertTrue(any(
+                "اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد" in x
+                for x in labels
+            ))
+            button_labels = [
+                control.content for control in self._find_controls(view, ft.TextButton)
+                if isinstance(control.content, str)
+            ]
+            self.assertTrue(any("تلاش دوباره" in x for x in button_labels))
+            self.assertIn("/history/public", self.app._api_read_errors)
+
+        self.loop.run_until_complete(run())
+
     def test_unexpected_screen_errors_are_logged_and_offer_retry(self):
         async def run():
             async def broken_view():

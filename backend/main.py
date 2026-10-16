@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete as sql_delete, func, select, update
 
 from . import ai, analytics, auth, eitaa
+from src.public_history import PublicHistoryError, fetch_public_channel_history
 from .db import (
     ActivityLog,
     AIUsage,
@@ -38,6 +39,7 @@ from .db import (
     Delivery,
     Feedback,
     MediaAsset,
+    PublicChannelPost,
     Post,
     PostRevision,
     RemovalReminder,
@@ -221,6 +223,11 @@ def _refresh_post(s, post_id: int) -> None:
         p.status = "scheduled"
     elif statuses == {"published"}:
         p.status = "published"
+    elif "published" in statuses:
+        # At least one destination succeeded but not every destination did.
+        # Keep that distinction visible instead of incorrectly calling it a
+        # total failure in the post list and analytics.
+        p.status = "partial"
     else:
         p.status = "failed"
 
@@ -607,6 +614,113 @@ def history(
             )
         statement = statement.offset(offset).limit(limit)
         return [_post_record(s, p) for p in s.scalars(statement)]
+
+
+@app.get("/api/history/public")
+async def public_channel_history(
+    channel_id: int = Query(..., ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Fetch public posts and persist them so later deletions do not erase history."""
+    with Session() as s:
+        channel = s.get(Channel, channel_id)
+        if not channel:
+            raise HTTPException(404, "کانال پیدا نشد.")
+        username = str(channel.chat_id or "").strip().lstrip("@")
+        channel_title = channel.title or username
+
+    try:
+        fresh = await fetch_public_channel_history(username, limit=limit)
+    except PublicHistoryError as exc:
+        with Session() as s:
+            archived = s.scalars(
+                select(PublicChannelPost)
+                .where(PublicChannelPost.channel_id == channel_id)
+                .order_by(PublicChannelPost.remote_message_id.desc())
+                .limit(limit)
+            ).all()
+            if not archived:
+                raise HTTPException(502, str(exc)) from exc
+            return [{
+                "id": f"eitaa:{username}:{item.remote_message_id}",
+                "source_post_id": item.remote_message_id,
+                "source_url": item.source_url,
+                "source": "eitaa_public",
+                "is_external": True,
+                "is_stale": True,
+                "title": "",
+                "text": item.text,
+                "status": "published",
+                "created_at": item.published_at,
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "channel_username": username,
+                "views": item.views,
+                "deliveries": [{
+                    "channel_id": channel_id,
+                    "channel_title": channel_title,
+                    "status": "published",
+                    "remote_message_id": item.remote_message_id,
+                    "done_at": item.published_at,
+                }],
+            } for item in archived]
+
+    with Session.begin() as s:
+        for item in fresh:
+            remote_id = int(item["source_post_id"])
+            record = s.scalar(
+                select(PublicChannelPost).where(
+                    PublicChannelPost.channel_id == channel_id,
+                    PublicChannelPost.remote_message_id == remote_id,
+                )
+            )
+            if record is None:
+                record = PublicChannelPost(
+                    channel_id=channel_id,
+                    remote_message_id=remote_id,
+                    text=item.get("text", ""),
+                    published_at=item.get("created_at", ""),
+                    source_url=item.get("source_url", ""),
+                    views=item.get("views"),
+                )
+                s.add(record)
+            else:
+                record.text = item.get("text", "")
+                record.published_at = item.get("created_at", "")
+                record.source_url = item.get("source_url", "")
+                record.views = item.get("views")
+            record.last_seen_at = now()
+
+    with Session() as s:
+        archived = s.scalars(
+            select(PublicChannelPost)
+            .where(PublicChannelPost.channel_id == channel_id)
+            .order_by(PublicChannelPost.remote_message_id.desc())
+            .limit(min(limit, 500))
+        ).all()
+        return [{
+            "id": f"eitaa:{username}:{item.remote_message_id}",
+            "source_post_id": item.remote_message_id,
+            "source_url": item.source_url,
+            "source": "eitaa_public",
+            "is_external": True,
+            "is_stale": False,
+            "title": "",
+            "text": item.text,
+            "status": "published",
+            "created_at": item.published_at,
+            "channel_id": channel_id,
+            "channel_title": channel_title,
+            "channel_username": username,
+            "views": item.views,
+            "deliveries": [{
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "status": "published",
+                "remote_message_id": item.remote_message_id,
+                "done_at": item.published_at,
+            }],
+        } for item in archived]
 
 
 @app.get("/api/posts/{pid}/revisions")
@@ -1329,13 +1443,31 @@ def add_auto(b: AutoIn, request: Request):
         raise HTTPException(400, "نام، کانال و متن یا قالب الزامی است.")
     if b.trigger not in ("daily", "weekly", "interval"):
         raise HTTPException(400, "نوع محرک نامعتبر است.")
-    if not re.match(r"^\d\d:\d\d$", b.at_time):
-        raise HTTPException(400, "قالب ساعت باید HH:MM باشد.")
+    try:
+        parsed_time = dt.datetime.strptime(b.at_time, "%H:%M").time()
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ساعت باید بین 00:00 تا 23:59 باشد.")
+    if parsed_time.strftime("%H:%M") != b.at_time:
+        raise HTTPException(400, "ساعت باید با قالب HH:MM باشد.")
+    if b.trigger == "interval" and not 1 <= b.interval_min <= 10080:
+        raise HTTPException(400, "فاصله اجرا باید بین ۱ تا ۱۰۰۸۰ دقیقه باشد.")
+    if any(day not in range(7) for day in b.weekdays):
+        raise HTTPException(400, "روز هفته نامعتبر است.")
     if b.trigger == "weekly" and not b.weekdays:
         raise HTTPException(400, "حداقل یک روز هفته انتخاب کنید.")
+    if len(b.channel_ids) != len(set(b.channel_ids)):
+        raise HTTPException(400, "کانال تکراری انتخاب شده است.")
     if not b.require_approval and not auth.can(request.state.user.role, "publish"):
         raise HTTPException(403, "انتشار بدون تأیید نیازمند دسترسی انتشار است.")
     with Session() as s:
+        requested_channels = set(b.channel_ids)
+        available_channels = set(s.scalars(
+            select(Channel.id).where(Channel.id.in_(requested_channels))
+        ))
+        if available_channels != requested_channels:
+            raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
+        if b.template_id is not None and not s.get(Template, b.template_id):
+            raise HTTPException(404, "قالب انتخاب‌شده پیدا نشد.")
         a = Automation(
             name=b.name, trigger=b.trigger, at_time=b.at_time,
             weekdays=",".join(map(str, b.weekdays)),
@@ -1529,12 +1661,13 @@ RULES = [
     (("POST",), r"^/api/removal-reminders/\d+/(cancel|reschedule)", "edit"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
-    (("POST",), r"^/api/posts$", "edit"),
     (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
     (("POST",), r"^/api/posts/\d+/publish$", "publish"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
     (("POST",), r"^/api/posts/\d+/(approve|reject)", "approve"),
-    (("POST", "DELETE"), r"^/api/(templates|media|automations|ai)", "edit"),
+    (("POST", "DELETE"), r"^/api/(templates|media|ai)", "edit"),
+    (("POST", "DELETE"), r"^/api/automations(?:/\d+)?$", "edit"),
+    (("POST",), r"^/api/automations/\d+/toggle$", "edit"),
 ]
 
 
@@ -1554,7 +1687,35 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "ابتدا وارد شوید."}, status_code=401)
     request.state.user = u
 
+    # Running an automation may create an approval-pending post or publish
+    # immediately. Allow editors and publishers to reach the endpoint; the
+    # endpoint itself enforces the extra publish permission when approval is
+    # disabled. The broad automation-management rule intentionally excludes
+    # this route so it cannot reject publishers before that check.
     matched_rule = False
+    if request.method == "POST" and re.fullmatch(r"/api/automations/\d+/run", path):
+        if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
+            return JSONResponse(
+                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                status_code=403,
+            )
+        matched_rule = True
+
+    # POST /api/posts chooses its permission from the submitted mode inside
+    # create_post(): drafts require "edit", while immediate/scheduled posts
+    # require "publish". The middleware must allow either capability to reach
+    # that endpoint-level check; otherwise publishers are blocked before it.
+    if request.method == "POST" and path == "/api/posts":
+        if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
+            return JSONResponse(
+                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                status_code=403,
+            )
+        # This endpoint has its own mode-dependent permission check below.
+        # Mark it as explicitly handled so the generic fallback does not
+        # reject non-owner editors/publishers.
+        matched_rule = True
+
     for methods, rx, perm in RULES:
         if request.method in methods and re.match(rx, path):
             matched_rule = True

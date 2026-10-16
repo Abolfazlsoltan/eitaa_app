@@ -49,6 +49,7 @@ Issues = "https://github.com/Abolfazlsoltan/eitaa_app/issues"
 [tool.flet]
 product = "ایتا منیجر"
 org = "app.eitaamanager"
+icon_background = "#0B1120"
 
 # ---------------------------------------------------------------------
 # Flet app layout.

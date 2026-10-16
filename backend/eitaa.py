@@ -61,7 +61,7 @@ async def send_message(
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
-    if view_to_delete is not None: p["view_to_delete"] = view_to_delete
+    if view_to_delete is not None: p["viewCountForDelete"] = view_to_delete
     if reply_to_message_id is not None:
         p["reply_to_message_id"] = reply_to_message_id
     return await _call(token, "sendMessage", **p)
@@ -74,8 +74,8 @@ async def send_file(
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
-    if view_to_delete is not None: p["view_to_delete"] = view_to_delete
+    if view_to_delete is not None: p["viewCountForDelete"] = view_to_delete
     if reply_to_message_id is not None:
         p["reply_to_message_id"] = reply_to_message_id
     with open(path, "rb") as f:
-        return await _call(token, "sendDocument", files={"file": (filename, f)}, **p)
+        return await _call(token, "sendFile", files={"file": (filename, f)}, **p)
