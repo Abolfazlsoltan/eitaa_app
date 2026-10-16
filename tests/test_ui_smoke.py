@@ -125,6 +125,48 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_empty_chat_shows_guidance_instead_of_a_blank_panel(self):
+        async def run():
+            await self.app.api.bootstrap()
+            view = await self.app.v_chat()
+            labels = [
+                control.value
+                for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertTrue(any("دستیار محتوای ایتا" in label for label in labels))
+            self.assertTrue(any("مثال برای شروع" in label for label in labels))
+
+        self.loop.run_until_complete(run())
+
+    def test_chat_send_stays_in_chat_and_passes_the_prompt_once(self):
+        async def run():
+            await self.app.api.bootstrap()
+            self.app.spawn = lambda coro: asyncio.create_task(coro)
+            self.app.go = AsyncMock()
+            self.app.api.ai = AsyncMock(return_value="پست آماده")
+            view = await self.app.v_chat()
+            prompt = self._find_controls(view, ft.TextField)[0]
+            send = next(
+                control for control in self._find_controls(view, ft.IconButton)
+                if control.icon == ft.Icons.SEND_ROUNDED
+            )
+            self.assertTrue(callable(prompt.on_submit))
+            prompt.value = "برای محصولم پست معرفی بنویس"
+            await send.on_click(None)
+
+            self.assertEqual(prompt.value, "")
+            self.app.api.ai.assert_awaited_once()
+            args, kwargs = self.app.api.ai.await_args
+            self.assertEqual(args, ("create", "برای محصولم پست معرفی بنویس"))
+            self.assertNotIn("prompt", kwargs)
+            self.assertTrue(callable(kwargs.get("on_chunk")))
+            self.app.go.assert_not_awaited()
+            self.assertEqual(self.app.chat_messages[-1]["text"], "پست آماده")
+            self.assertEqual(self.app.chat_messages[-1]["status"], "ready")
+
+        self.loop.run_until_complete(run())
+
     def test_chat_request_failure_preserves_input_and_retry_succeeds(self):
         async def run():
             await self.app.api.bootstrap()
