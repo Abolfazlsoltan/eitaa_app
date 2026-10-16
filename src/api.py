@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from public_history import PublicHistoryError, fetch_public_channel_history
 from ai import AIServiceError, AnonymousAI
 import config
 
@@ -914,6 +915,9 @@ class Api:
         if path == "/history":
             return await self._device_history(params or {})
 
+        if path == "/history/public":
+            return await self._device_public_history(params or {})
+
         m = re.match(r"^/posts/(\d+)/cancel$", path)
         if m and method == "POST":
             return await self._cancel_post(int(m.group(1)))
@@ -961,6 +965,26 @@ class Api:
             "data:" + key,
             json.dumps(value, ensure_ascii=False, default=str),
         )
+
+    async def _device_public_history(self, params: dict) -> list[dict]:
+        """Read public posts from Eitaa, independently of this app's publish log."""
+        try:
+            channel_id = int(params.get("channel_id"))
+        except (TypeError, ValueError):
+            raise ApiError("برای دریافت تاریخچهٔ عمومی باید یک کانال انتخاب شود.")
+        channels = await self._load("channels", [])
+        channel = next(
+            (item for item in channels
+             if isinstance(item, dict) and item.get("id") == channel_id),
+            None,
+        )
+        if not channel:
+            raise ApiError("کانال انتخاب‌شده پیدا نشد.")
+        username = str(channel.get("chat_id") or "").strip().lstrip("@")
+        try:
+            return await fetch_public_channel_history(username, limit=100)
+        except PublicHistoryError as exc:
+            raise ApiError(str(exc), retryable=True) from exc
 
     async def _device_history(self, params: dict) -> list[dict]:
         posts = await self._load("posts", [])
