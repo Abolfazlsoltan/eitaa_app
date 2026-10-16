@@ -311,6 +311,10 @@ class PostEditIn(BaseModel):
     media_id: int | None = None
 
 
+class RemoteEditIn(BaseModel):
+    text: str = Field(min_length=1, max_length=20_000)
+
+
 class FeedbackIn(BaseModel):
     category: Literal["suggestion", "complaint", "bug"]
     message: str = Field(min_length=5, max_length=4000)
@@ -607,6 +611,121 @@ def history(
             )
         statement = statement.offset(offset).limit(limit)
         return [_post_record(s, p) for p in s.scalars(statement)]
+
+
+@app.put("/api/posts/{pid}/remote-edit")
+async def edit_published_message(pid: int, b: RemoteEditIn, request: Request):
+    """Edit the real Eitaa message(s), not just the local post record."""
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای ویرایش پیام منتشرشده را ندارید.")
+    if not b.text.strip():
+        raise HTTPException(400, "متن پیام خالی است.")
+
+    with Session() as s:
+        post = s.get(Post, pid)
+        if not post:
+            raise HTTPException(404, "پست پیدا نشد.")
+        deliveries = s.scalars(
+            select(Delivery).where(
+                Delivery.post_id == pid, Delivery.status == "published"
+            )
+        ).all()
+        if not deliveries:
+            raise HTTPException(409, "برای این پست پیام منتشرشده‌ای ثبت نشده است.")
+        prepared = []
+        for delivery in deliveries:
+            if not delivery.remote_message_id:
+                raise HTTPException(
+                    409,
+                    "شناسهٔ پیام ایتا برای یکی از انتشارها ثبت نشده؛ ویرایش امن ممکن نیست.",
+                )
+            channel = s.get(Channel, delivery.channel_id)
+            connection = s.get(Connection, channel.connection_id) if channel else None
+            if not channel or not connection:
+                raise HTTPException(409, "اطلاعات اتصال یکی از کانال‌ها ناقص است.")
+            token = fernet.decrypt(connection.token_enc.encode()).decode()
+            prepared.append((delivery.id, channel, delivery.remote_message_id, token, bool(post.media_id)))
+
+        errors = []
+        for delivery_id, channel, message_id, token, is_media in prepared:
+            try:
+                await eitaa.edit_message(
+                    token, channel.chat_id, message_id, b.text, caption=is_media
+                )
+            except eitaa.EitaaError as exc:
+                errors.append({"channel_id": channel.id, "channel": channel.title, "error": str(exc)})
+
+        if errors:
+            raise HTTPException(
+                502,
+                detail={
+                    "message": "ویرایش پیام در ایتا کامل نشد؛ متن کانال ممکن است هنوز تغییر نکرده باشد.",
+                    "errors": errors,
+                },
+            )
+        post.text = b.text
+        post.updated_at = now()
+        s.add(PostRevision(post_id=post.id, title=post.title, text=post.text,
+                           signature=post.signature))
+        log(s, "edit_remote", f"پیام منتشرشده «{post.title or post.id}» ویرایش شد")
+        s.commit()
+        return {"ok": True, "updated_channels": len(prepared)}
+
+
+@app.delete("/api/posts/{pid}/remote-delete")
+async def delete_published_message(pid: int, request: Request):
+    """Delete the actual Eitaa message(s), not merely the local history record."""
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای حذف پیام منتشرشده را ندارید.")
+
+    with Session() as s:
+        post = s.get(Post, pid)
+        if not post:
+            raise HTTPException(404, "پست پیدا نشد.")
+        deliveries = s.scalars(
+            select(Delivery).where(
+                Delivery.post_id == pid, Delivery.status == "published"
+            )
+        ).all()
+        if not deliveries:
+            raise HTTPException(409, "برای این پست پیام منتشرشده‌ای ثبت نشده است.")
+        prepared = []
+        for delivery in deliveries:
+            if not delivery.remote_message_id:
+                raise HTTPException(
+                    409,
+                    "شناسهٔ پیام ایتا برای یکی از انتشارها ثبت نشده؛ حذف امن ممکن نیست.",
+                )
+            channel = s.get(Channel, delivery.channel_id)
+            connection = s.get(Connection, channel.connection_id) if channel else None
+            if not channel or not connection:
+                raise HTTPException(409, "اطلاعات اتصال یکی از کانال‌ها ناقص است.")
+            token = fernet.decrypt(connection.token_enc.encode()).decode()
+            prepared.append((delivery, channel, delivery.remote_message_id, token))
+
+        errors = []
+        for delivery, channel, message_id, token in prepared:
+            try:
+                await eitaa.delete_message(token, channel.chat_id, message_id)
+            except eitaa.EitaaError as exc:
+                errors.append({"channel_id": channel.id, "channel": channel.title, "error": str(exc)})
+
+        if errors:
+            raise HTTPException(
+                502,
+                detail={
+                    "message": "حذف پیام در ایتا کامل نشد؛ بعضی پیام‌ها ممکن است باقی مانده باشند.",
+                    "errors": errors,
+                },
+            )
+        for delivery, _channel, _message_id, _token in prepared:
+            delivery.status = "deleted"
+            delivery.done_at = now()
+        post.status = "deleted"
+        post.updated_at = now()
+        log(s, "delete_remote", f"پیام منتشرشده «{post.title or post.id}» حذف شد")
+        s.commit()
+        return {"ok": True, "deleted_channels": len(prepared)}
 
 
 @app.get("/api/posts/{pid}/revisions")
