@@ -239,7 +239,7 @@ class ClientFeatureTests(unittest.TestCase):
                     "signature": "footer",
                     "channel_ids": [1],
                     "mode": "now",
-                    "view_to_delete": 50,
+                    "viewCountForDelete": 50,
                     "reply_to_message_id": 7,
                 })
             self.assertEqual(result["status"], "published")
