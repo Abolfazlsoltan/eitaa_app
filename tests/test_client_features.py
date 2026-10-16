@@ -249,6 +249,7 @@ class ClientFeatureTests(unittest.TestCase):
                 {
                     "chat_id": "test-channel",
                     "text": "body\n\nfooter",
+                    "parse_mode": "HTML",
                     "title": "title",
                     "view_to_delete": 50,
                     "reply_to_message_id": 7,
