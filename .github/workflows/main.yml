@@ -79,6 +79,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "flet[all]==1.0.4"
 
+      # Flet packages the launcher icon from the app directory (src/assets),
+      # while the original artwork is kept at repository-root assets/icon.png.
+      # Copy it into the actual app path before building, or Flet silently uses
+      # its default launcher icon.
+      - name: Restore custom app icon
+        run: |
+          set -euo pipefail
+          test -s assets/icon.png
+          mkdir -p src/assets
+          cp assets/icon.png src/assets/icon.png
+          file src/assets/icon.png
+          python - <<'PY'
+          from pathlib import Path
+          import struct
+
+          icon = Path("src/assets/icon.png")
+          data = icon.read_bytes()
+          if not data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):
+              raise SystemExit("Custom app icon is not a valid PNG")
+          width, height = struct.unpack(">II", data[16:24])
+          if width < 512 or height < 512:
+              raise SystemExit(f"Icon is too small: {width}x{height}")
+          print(f"Using custom launcher icon: {width}x{height}")
+          PY
+
       - name: Build APK
         shell: bash
         env:
