@@ -3200,6 +3200,22 @@ async def main(page: ft.Page):
     if not app.api.online:
         asyncio.create_task(app._local_schedule_loop())
 
+    # Android only dispatches a reliable system-back pop when there is a
+    # navigable View stack. The app otherwise renders one logical screen in a
+    # single body container, so keep a lightweight root + active view stack.
+    def active_app_view():
+        return ft.View(
+            route="/app",
+            controls=[ft.SafeArea(content=app.body, expand=True)],
+            padding=0,
+        )
+
+    page.views.clear()
+    page.views.extend([
+        ft.View(route="/", controls=[], padding=0),
+        active_app_view(),
+    ])
+
     def handle_keyboard_back(event):
         key = str(getattr(event, "key", "") or "").strip().lower()
         key = key.replace(" ", "").replace("_", "").replace("-", "")
@@ -3211,14 +3227,11 @@ async def main(page: ft.Page):
             app.spawn(app.handle_back())
 
     def handle_view_pop(event):
-        # This app uses one root view and manages its own logical screens.
-        # Prevent Navigator from popping that root and closing the app.
-        view = getattr(event, "view", None)
-        if view is not None:
-            try:
-                view.can_pop = False
-            except Exception:
-                logger.debug("Could not lock root view against native pop")
+        # Keep the active app view mounted; route the hardware/back gesture
+        # through the app's own screen map instead of letting Android exit.
+        if len(page.views) > 1:
+            popped = page.views.pop()
+            page.views.append(popped)
         app.spawn(app.handle_back())
 
     page.on_keyboard_event = handle_keyboard_back
@@ -3229,7 +3242,6 @@ async def main(page: ft.Page):
         app.apply_appearance(app.theme_mode, app.accent_name),
         page.update(),
     )
-    page.add(ft.SafeArea(content=app.body, expand=True))
     await app.boot()
 
 
