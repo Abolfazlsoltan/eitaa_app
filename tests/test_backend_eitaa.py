@@ -27,6 +27,7 @@ class EitaaAdapterTests(unittest.IsolatedAsyncioTestCase):
             "sendMessage",
             chat_id="test-channel",
             text="body",
+            parse_mode="HTML",
             title="title",
             disable_notification=1,
             pin=1,
@@ -57,6 +58,7 @@ class EitaaAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[:2], ("test-token", "sendDocument"))
         self.assertEqual(kwargs["chat_id"], "test-channel")
         self.assertEqual(kwargs["caption"], "caption")
+        self.assertEqual(kwargs["parse_mode"], "HTML")
         self.assertEqual(kwargs["view_to_delete"], 5)
         self.assertEqual(kwargs["reply_to_message_id"], 7)
         self.assertEqual(kwargs["files"]["file"][0], "test.pdf")
