@@ -1786,6 +1786,9 @@ class App:
             (c for c in self.channels if c.get("id") == channel_id), None
         )
         title = channel.get("title") if channel else "تاریخچه کانال"
+        self._api_read_errors.pop("/history", None)
+        self._api_read_errors.pop("/history/public", None)
+
         try:
             posts = await self.api.get("/history", params={
                 "channel_id": channel_id,
@@ -1793,8 +1796,36 @@ class App:
                 "limit": 200,
                 "offset": 0,
             })
-        except ApiError:
+        except ApiError as exc:
+            self._api_read_errors["/history"] = self._safe_message(str(exc))
             posts = []
+
+        public_posts = []
+        try:
+            public_posts = await self.api.get(
+                "/history/public",
+                params={"channel_id": channel_id, "limit": 100},
+            )
+            self._api_read_errors.pop("/history/public", None)
+        except ApiError as exc:
+            self._api_read_errors["/history/public"] = self._safe_message(str(exc))
+
+        # If a post was published by this app and also appears on the public
+        # page, keep the tracked record (it has richer delivery information).
+        known_remote_ids = {
+            str(delivery.get("remote_message_id"))
+            for post in posts if isinstance(post, dict)
+            for delivery in post.get("deliveries", [])
+            if delivery.get("remote_message_id") is not None
+        }
+        for item in public_posts:
+            if str(item.get("source_post_id", "")) not in known_remote_ids:
+                posts.append(item)
+        posts.sort(
+            key=lambda item: str(item.get("created_at") or ""),
+            reverse=True,
+        )
+
         children = [
             self.gradient_header(
                 title or "تاریخچه",
@@ -1813,22 +1844,40 @@ class App:
             ),
             ft.Container(height=12),
         ]
+        warning = self._api_read_error_notice(
+            lambda: self.spawn(self.go("channel_history", channel_id))
+        )
+        if warning:
+            children.extend([
+                ft.Container(
+                    content=warning,
+                    margin=ft.Margin.symmetric(horizontal=16, vertical=4),
+                ),
+                ft.Container(height=8),
+            ])
         if not posts:
             children.append(empty_state(
                 ft.Icons.HISTORY,
-                "سابقه‌ای ثبت نشده",
-                "فقط پیام‌هایی که از این برنامه ارسال شده‌اند اینجا دیده می‌شوند",
+                "پستی برای نمایش پیدا نشد",
+                "تاریخچهٔ پست‌های برنامه و پست‌های قابل‌مشاهده در صفحهٔ عمومی ایتا اینجا نمایش داده می‌شود.",
             ))
         else:
             for item in posts:
+                card_items = []
+                if item.get("is_external"):
+                    card_items.append(T(
+                        "پست دریافت‌شده از کانال ایتا",
+                        size=11, color=Palette.ACCENT,
+                    ))
+                card_items.extend([
+                    T(item.get("text", "")[:160] or "پست بدون متن",
+                      size=13, color=Palette.TEXT, max_lines=3,
+                      overflow=ft.TextOverflow.ELLIPSIS),
+                    T(item.get("created_at", ""), size=11,
+                      color=Palette.MUTED),
+                ])
                 children.append(ft.Container(
-                    content=ft.Column([
-                        T(item.get("text", "")[:160], size=13,
-                          color=Palette.TEXT, max_lines=3,
-                          overflow=ft.TextOverflow.ELLIPSIS),
-                        T(item.get("created_at", ""), size=11,
-                          color=Palette.MUTED),
-                    ], spacing=4),
+                    content=ft.Column(card_items, spacing=4),
                     padding=14,
                     margin=ft.Margin.symmetric(horizontal=16, vertical=4),
                     border_radius=16,
