@@ -2458,7 +2458,7 @@ class App:
                         ft.Icons.CAMPAIGN_OUTLINED,
                         "کانال‌های من",
                         "مدیریت اتصالات و کانال‌ها",
-                        lambda e: self.spawn(self.go("help")),
+                        lambda e: self.spawn(self._channels_sheet()),
                     ),
                     tile(
                         ft.Icons.GROUPS_OUTLINED,
