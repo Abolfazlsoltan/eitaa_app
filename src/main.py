@@ -1858,7 +1858,23 @@ class App:
                     )
                 else:
                     body = self._assistant_message_body(content)
-                    bubble_content = body
+                    if msg.get("status") == "typing":
+                        bubble_content = ft.Row([
+                            ft.ProgressRing(width=16, height=16, stroke_width=2,
+                                            color=Palette.PRIMARY),
+                            T("در حال نوشتن...", size=13, color=Palette.MUTED),
+                        ], spacing=8, tight=True)
+                    elif msg.get("status") == "streaming":
+                        bubble_content = ft.Column([
+                            body,
+                            ft.Row([
+                                ft.ProgressRing(width=12, height=12, stroke_width=1.5,
+                                                color=Palette.PRIMARY),
+                                T("در حال نوشتن...", size=11, color=Palette.MUTED),
+                            ], spacing=6, tight=True),
+                        ], spacing=6, tight=True)
+                    else:
+                        bubble_content = body
                 list_view.controls.append(
                     ft.Row([
                         ft.Container(
@@ -1893,11 +1909,15 @@ class App:
 
         prompt = tf("پیام خود را بنویس...", multiline=True, min_lines=1,
                     max_lines=4)
+        chat_state = {"sending": False}
 
         async def send(_=None, retry_text: str | None = None):
+            if chat_state["sending"]:
+                return
             text = (retry_text if retry_text is not None else prompt.value or "").strip()
             if not text:
                 return
+            chat_state["sending"] = True
 
             retrying = (
                 retry_text is not None
@@ -1916,6 +1936,10 @@ class App:
                 self.chat_messages.append(user_message)
 
             prompt.value = ""
+            assistant_message = {
+                "role": "assistant", "text": "", "status": "typing",
+            }
+            self.chat_messages.append(assistant_message)
             rebuild()
             try:
                 reply = await self.api.ai("create", text, prompt=text)
@@ -1923,6 +1947,9 @@ class App:
                 # Keep the user's text recoverable and offer a one-tap retry.
                 prompt.value = text
                 user_message["status"] = "failed"
+                if assistant_message in self.chat_messages:
+                    self.chat_messages.remove(assistant_message)
+                chat_state["sending"] = False
                 rebuild()
                 try:
                     await self.api._store_verified(
@@ -1935,9 +1962,16 @@ class App:
                 return
 
             user_message["status"] = "ready"
-            self.chat_messages.append({
-                "role": "assistant", "text": reply, "status": "ready",
-            })
+            assistant_message["status"] = "streaming"
+            # Reveal the answer in small chunks to avoid a sudden full-text jump.
+            chunk_size = 72
+            for end in range(chunk_size, len(reply), chunk_size):
+                assistant_message["text"] = reply[:end]
+                rebuild()
+                await asyncio.sleep(0.025)
+            assistant_message["text"] = reply
+            assistant_message["status"] = "ready"
+            chat_state["sending"] = False
             try:
                 await self.api._store_verified(
                     "chat_history",
