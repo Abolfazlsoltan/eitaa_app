@@ -288,6 +288,7 @@ class App:
 
         self.me: dict = {"name": "محلی", "role": "local"}
         self.channels: list = []
+        self._api_read_errors: dict[str, str] = {}
         self.view = "home"
         self._last_primary_view = "home"
         self.theme_mode = "light"
@@ -1117,6 +1118,7 @@ class App:
 
     # =============================================================== views =
     async def v_home(self):
+        self._api_read_errors.clear()
         stats = await self._safe_get("/stats", {})
         if isinstance(stats, dict):
             stats["ai_calls"] = len(await self.api._load("ai_usage", []))
@@ -1161,6 +1163,15 @@ class App:
             self._parse_web_card(),
             ft.Container(height=28),
         ]
+
+        notice = self._api_read_error_notice(
+            lambda: self.spawn(self.go("home"))
+        )
+        if notice is not None:
+            children.insert(2, ft.Container(
+                content=notice,
+                padding=ft.Padding.symmetric(horizontal=16),
+            ))
 
         # ---- recent posts ----
         if recent:
@@ -1476,9 +1487,42 @@ class App:
 
     async def _safe_get(self, path, default):
         try:
-            return await self.api.get(path)
-        except ApiError:
+            result = await self.api.get(path)
+        except ApiError as exc:
+            self._api_read_errors[path] = self._safe_message(str(exc))
             return default
+        self._api_read_errors.pop(path, None)
+        return result
+
+    def _api_read_error_notice(self, retry):
+        if not self._api_read_errors:
+            return None
+        count = len(self._api_read_errors)
+        detail = (
+            "بارگذاری بعضی اطلاعات کامل نشد؛ ممکن است این فهرست کامل نباشد."
+            if count > 1
+            else "بارگذاری اطلاعات کامل نشد؛ ممکن است این فهرست کامل نباشد."
+        )
+        return surface_card(
+            ft.Row([
+                ft.Icon(ft.Icons.CLOUD_OFF_OUTLINED, color=Palette.DANGER, size=22),
+                ft.Column([
+                    T("اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد",
+                      size=13, weight=ft.FontWeight.W_600, color=Palette.TEXT),
+                    T(detail, size=12, color=Palette.MUTED),
+                ], spacing=4, expand=True),
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([
+                ft.TextButton(
+                    "تلاش دوباره",
+                    icon=ft.Icons.REFRESH,
+                    on_click=lambda e: retry(),
+                ),
+            ], alignment=ft.MainAxisAlignment.END),
+            padding=14,
+            elevation=False,
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, Palette.DANGER)),
+        )
 
     async def _persist_ai_preference(self, name: str, value: str):
         try:
@@ -1489,6 +1533,7 @@ class App:
             pass
 
     async def v_posts(self, flt: str = "all", q: str = ""):
+        self._api_read_errors.clear()
         posts = await self._safe_get("/posts", [])
         self.channels = await self._safe_get("/channels", self.channels)
         names = {c["id"]: c["title"] for c in self.channels}
@@ -1546,6 +1591,15 @@ class App:
         )
 
         body = [header, ft.Container(height=12)]
+        notice = self._api_read_error_notice(
+            lambda: self.spawn(self.go("posts", flt, q))
+        )
+        if notice is not None:
+            body.append(ft.Container(
+                content=notice,
+                padding=ft.Padding.symmetric(horizontal=16),
+            ))
+            body.append(ft.Container(height=8))
         body.append(ft.Container(content=filter_row, padding=ft.Padding.symmetric(horizontal=16)))
         body.append(ft.Container(height=10))
         body.append(ft.Container(content=search, padding=ft.Padding.symmetric(horizontal=16)))
