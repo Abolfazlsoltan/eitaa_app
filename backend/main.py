@@ -732,7 +732,9 @@ def delete_post(pid: int, request: Request):
 
 
 @app.post("/api/deliveries/{did}/retry")
-def retry(did: int):
+def retry(did: int, request: Request):
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای انتشار را ندارید.")
     with Session() as s:
         d = s.get(Delivery, did)
         if not d or d.status != "failed":
@@ -743,24 +745,31 @@ def retry(did: int):
 
 
 @app.post("/api/posts/{pid}/cancel")
-def cancel(pid: int):
+def cancel(pid: int, request: Request):
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای لغو انتشار را ندارید.")
     with Session() as s:
+        p = s.get(Post, pid)
+        if not p:
+            raise HTTPException(404, "پست پیدا نشد.")
+        if p.status not in ("scheduled", "queued", "pending"):
+            raise HTTPException(400, "فقط پست در صف یا زمان‌بندی‌شده قابل لغو است.")
         s.execute(
             update(Delivery)
             .where(Delivery.post_id == pid,
                    Delivery.status.in_(["scheduled", "queued", "pending"]))
             .values(status="cancelled")
         )
-        p = s.get(Post, pid)
-        if p:
-            p.status = "cancelled"
+        p.status = "cancelled"
         log(s, "cancel", f"پست {pid} لغو شد")
         s.commit()
         return {"ok": True}
 
 
 @app.post("/api/posts/{pid}/reschedule")
-def reschedule(pid: int, b: ReIn):
+def reschedule(pid: int, b: ReIn, request: Request):
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای زمان‌بندی را ندارید.")
     with Session() as s:
         p = s.get(Post, pid)
         if not p or p.status != "scheduled":
