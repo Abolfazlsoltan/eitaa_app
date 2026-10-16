@@ -75,6 +75,23 @@ class Delivery(Base):  # independent status per channel
     remote_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class PublicChannelPost(Base):
+    """Durable archive of posts discovered on a public Eitaa channel page."""
+    __tablename__ = "public_channel_posts"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "remote_message_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"))
+    remote_message_id: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text, default="")
+    published_at: Mapped[str] = mapped_column(String(100), default="")
+    source_url: Mapped[str] = mapped_column(String(500), default="")
+    views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+
+
 class Feedback(Base):
     __tablename__ = "feedback"
     id: Mapped[int] = mapped_column(primary_key=True)
