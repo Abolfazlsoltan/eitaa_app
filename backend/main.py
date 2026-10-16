@@ -1575,14 +1575,18 @@ async def guard(request: Request, call_next):
     # create_post(): drafts require "edit", while immediate/scheduled posts
     # require "publish". The middleware must allow either capability to reach
     # that endpoint-level check; otherwise publishers are blocked before it.
+    matched_rule = False
     if request.method == "POST" and path == "/api/posts":
         if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
             return JSONResponse(
                 {"detail": "دسترسی لازم برای این عملیات را ندارید."},
                 status_code=403,
             )
+        # This endpoint has its own mode-dependent permission check below.
+        # Mark it as explicitly handled so the generic fallback does not
+        # reject non-owner editors/publishers.
+        matched_rule = True
 
-    matched_rule = False
     for methods, rx, perm in RULES:
         if request.method in methods and re.match(rx, path):
             matched_rule = True
