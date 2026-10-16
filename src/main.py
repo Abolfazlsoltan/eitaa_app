@@ -1508,6 +1508,7 @@ class App:
             ("draft", "پیش‌نویس"),
             ("scheduled", "زمان‌بندی"),
             ("published", "منتشرشده"),
+            ("partial", "ارسال ناقص"),
             ("failed", "ناموفق"),
         ]
 
