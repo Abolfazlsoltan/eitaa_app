@@ -1804,9 +1804,14 @@ class App:
         try:
             public_posts = await self.api.get(
                 "/history/public",
-                params={"channel_id": channel_id, "limit": 100},
+                params={"channel_id": channel_id, "limit": 500},
             )
-            self._api_read_errors.pop("/history/public", None)
+            if any(item.get("is_stale") for item in public_posts):
+                self._api_read_errors["/history/public"] = (
+                    "نمایش آرشیو ذخیره‌شده؛ دریافت تازه از ایتا موفق نبود."
+                )
+            else:
+                self._api_read_errors.pop("/history/public", None)
         except ApiError as exc:
             self._api_read_errors["/history/public"] = self._safe_message(str(exc))
 
