@@ -93,7 +93,7 @@ jobs:
       # GitHub runner generates a different key and Android rejects updates
       # over an APK installed from an earlier workflow run.
       - name: Restore stable Android debug signing key
-        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
+        uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: android-debug-signing-v1-${{ runner.os }}-eitaa-manager
