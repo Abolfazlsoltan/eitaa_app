@@ -774,13 +774,18 @@ def reschedule(pid: int, b: ReIn, request: Request):
         p = s.get(Post, pid)
         if not p or p.status != "scheduled":
             raise HTTPException(400, "فقط پست زمان‌بندی‌شده قابل جابجایی است.")
-        if b.scheduled_at < now():
-            raise HTTPException(400, "زمان جدید گذشته است.")
-        p.scheduled_at = b.scheduled_at
+        scheduled_at = b.scheduled_at
+        if scheduled_at.tzinfo is not None:
+            scheduled_at = scheduled_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        if scheduled_at <= now():
+            raise HTTPException(400, "زمان جدید باید در آینده باشد.")
+        if scheduled_at > now() + dt.timedelta(days=30):
+            raise HTTPException(400, "زمان‌بندی فقط تا ۳۰ روز آینده مجاز است.")
+        p.scheduled_at = scheduled_at
         s.execute(
             update(Delivery)
             .where(Delivery.post_id == pid, Delivery.status == "scheduled")
-            .values(run_at=b.scheduled_at)
+            .values(run_at=scheduled_at)
         )
         log(s, "reschedule", f"زمان پست {pid} تغییر کرد")
         s.commit()
@@ -788,7 +793,9 @@ def reschedule(pid: int, b: ReIn, request: Request):
 
 
 @app.post("/api/posts/{pid}/approve")
-def approve(pid: int):
+def approve(pid: int, request: Request):
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای تأیید انتشار را ندارید.")
     with Session() as s:
         p = s.get(Post, pid)
         if not p or p.status != "pending":
@@ -805,7 +812,9 @@ def approve(pid: int):
 
 
 @app.post("/api/posts/{pid}/reject")
-def reject(pid: int):
+def reject(pid: int, request: Request):
+    if not auth.can(request.state.user.role, "publish"):
+        raise HTTPException(403, "دسترسی لازم برای رد انتشار را ندارید.")
     with Session() as s:
         p = s.get(Post, pid)
         if not p or p.status != "pending":
