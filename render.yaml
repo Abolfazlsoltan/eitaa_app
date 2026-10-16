@@ -1,0 +1,25 @@
+# Deployment blueprint for the FastAPI backend.
+# SQLite and media use a persistent disk; this is suitable for a small temporary
+# deployment, not a high-availability multi-instance production deployment.
+services:
+  - type: web
+    name: eitaa-manager-api
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: eitaa-manager-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: APP_SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite:////var/data/data.db
+      - key: MEDIA_DIR
+        value: /var/data/media
+      - key: TZ_OFFSET_MIN
+        value: "210"
+      - key: CORS_ORIGINS
+        value: "tauri://localhost,http://tauri.localhost,http://localhost:5173"
