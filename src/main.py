@@ -1521,7 +1521,6 @@ class App:
             ], alignment=ft.MainAxisAlignment.END),
             padding=14,
             elevation=False,
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.35, Palette.DANGER)),
         )
 
     async def _persist_ai_preference(self, name: str, value: str):
