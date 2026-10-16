@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="440" viewBox="0 0 900 440">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07143b"/><stop offset="1" stop-color="#102c73"/></linearGradient>
+ <linearGradient id="plane" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#5ffbf1"/><stop offset=".52" stop-color="#12b8ff"/><stop offset="1" stop-color="#2455ff"/></linearGradient>
+ <linearGradient id="card" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#254fd2"/><stop offset="1" stop-color="#112b79"/></linearGradient>
+ <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#020617" flood-opacity=".45"/></filter>
+</defs>
+<rect width="900" height="440" rx="36" fill="url(#bg)"/>
+<circle cx="450" cy="222" r="150" fill="none" stroke="#087cf4" stroke-width="18" opacity=".48"/>
+<circle cx="450" cy="222" r="128" fill="#0a235b" stroke="#24d5ef" stroke-width="2" opacity=".9"/>
+<g filter="url(#shadow)" transform="translate(300 110)">
+ <path d="M10 100 L270 5 Q282 1 276 18 L181 232 Q175 247 164 231 L119 163 L63 203 Q53 210 53 195 L56 146 L10 119 Q-3 111 10 100Z" fill="url(#plane)"/>
+ <path d="M56 146 L211 57 L119 163" fill="#0b5bd7" opacity=".85"/>
+ <path d="M119 163 L164 231 L211 57" fill="#1d8eff" opacity=".85"/>
+</g>
+<g filter="url(#shadow)" transform="translate(48 45) rotate(-7 100 60)">
+ <rect width="205" height="110" rx="20" fill="#f7fbff"/>
+ <rect x="15" y="15" width="62" height="80" rx="12" fill="#167af3"/>
+ <circle cx="46" cy="36" r="9" fill="#c5f8ff"/><path d="M22 79 L42 54 L57 69 L69 56 L74 79Z" fill="#51e9ef"/>
+ <rect x="92" y="28" width="94" height="10" rx="5" fill="#2ab8ff"/><rect x="92" y="49" width="76" height="9" rx="4" fill="#7d9eff"/><rect x="92" y="69" width="60" height="9" rx="4" fill="#b2c6ff"/>
+</g>
+<g filter="url(#shadow)" transform="translate(655 42) rotate(7 90 60)">
+ <rect width="178" height="118" rx="20" fill="#f3f7ff"/><rect width="178" height="31" rx="20" fill="#2361e8"/><rect y="17" width="178" height="14" fill="#2361e8"/>
+ <circle cx="89" cy="72" r="33" fill="#1254ce"/><path d="M89 49 V72 L106 82" stroke="#fff" stroke-width="7" stroke-linecap="round" fill="none"/>
+</g>
+<g filter="url(#shadow)" transform="translate(48 238)">
+ <rect width="142" height="142" rx="26" fill="url(#card)" stroke="#4f8dff" stroke-width="2"/>
+ <rect x="30" y="42" width="82" height="59" rx="24" fill="#d8f8ff"/><rect x="39" y="51" width="64" height="42" rx="17" fill="#123a9e"/>
+ <circle cx="57" cy="70" r="7" fill="#28e4ed"/><circle cx="84" cy="70" r="7" fill="#28e4ed"/><path d="M58 84 Q70 93 83 84" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round"/><path d="M71 27 V42" stroke="#e0f7ff" stroke-width="6" stroke-linecap="round"/><circle cx="71" cy="22" r="8" fill="#e0f7ff"/>
+</g>
+<g filter="url(#shadow)" transform="translate(696 240) rotate(-8 78 65)">
+ <rect width="150" height="132" rx="22" fill="url(#card)" stroke="#4f8dff" stroke-width="2"/>
+ <rect x="24" y="87" width="19" height="24" rx="5" fill="#24e2db"/><rect x="54" y="67" width="19" height="44" rx="5" fill="#24e2db"/><rect x="84" y="45" width="19" height="66" rx="5" fill="#24e2db"/><path d="M24 69 L57 42 L79 51 L119 19" stroke="#46f5d2" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M102 19 H119 V36" stroke="#46f5d2" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</g>
+<g filter="url(#shadow)" transform="translate(310 325) rotate(-4 130 40)">
+ <rect width="280" height="72" rx="19" fill="url(#card)" stroke="#3979ff" stroke-width="2"/>
+ <rect x="24" y="19" width="140" height="9" rx="4" fill="#eaf3ff"/><rect x="24" y="37" width="108" height="8" rx="4" fill="#a9c7ff"/><rect x="24" y="53" width="77" height="7" rx="3" fill="#719aff"/>
+ <circle cx="236" cy="36" r="21" fill="#18d6b3"/><path d="M225 36 L233 44 L248 28" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</g>
+<circle cx="286" cy="211" r="5" fill="#25f0df"/><circle cx="612" cy="207" r="6" fill="#168bff"/><circle cx="257" cy="360" r="4" fill="#168bff"/><circle cx="647" cy="350" r="5" fill="#25f0df"/>
+</svg>
