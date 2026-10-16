@@ -9,8 +9,14 @@ UNSUPPORTED = "این عملیات در API عمومی فعلی ایتایار �
 class EitaaError(Exception): pass
 
 def markdown_to_html(value: str) -> str:
-    """Render a common Markdown subset as escaped Bot API HTML."""
+    """Convert the safe, common Markdown subset to Eitaa Bot API HTML.
+
+    Escape source text first so user-provided HTML is never passed through.
+    Unsupported Markdown is left readable rather than silently deleted.
+    """
     import html
+    import re
+
     source = html.escape(str(value or ""), quote=False)
     code_blocks = []
 
@@ -25,12 +31,14 @@ def markdown_to_html(value: str) -> str:
     source = re.sub(r"\\*([^*\\n]+)\\*|_([^_\\n]+)_", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
     source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
     source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
-    source = re.sub(r"(?m)^\\s*[-*+]\\s+(.+)$", r"• \1", source)
-    source = re.sub(r"(?m)^\\s*\\d+[.)]\\s+(.+)$", r"\1", source)
-    source = source.replace("\\n", "<br>")
+    source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
+    source = re.sub(r"(?m)^\s*\d+[.)]\s+(.+)$", r"\1", source)
+    source = source.replace("\n", "<br>")
     for index, code in enumerate(code_blocks):
-        source = source.replace(f"\\x00CODE{index}\\x00", f"<pre>{code}</pre>")
+        source = source.replace(f"\x00CODE{index}\x00", f"<pre>{code}</pre>")
     return source
+
+
 
 
 def normalize_channel(raw: str) -> str:
