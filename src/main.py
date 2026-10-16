@@ -2187,7 +2187,8 @@ class App:
             preview.content = ft.Column([
                 T(title or "بدون عنوان", size=15,
                   weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                T(text or "متن خالی است", size=13, color=Palette.MUTED),
+                self._assistant_message_body(text)
+                if text else T("متن خالی است", size=13, color=Palette.MUTED),
             ], spacing=6, tight=True)
             self.page.update()
 
