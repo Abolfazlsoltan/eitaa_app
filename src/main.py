@@ -2080,6 +2080,13 @@ class App:
         time_f = tf("ساعت (HH:MM)", hint_text="مثلاً 14:30")
 
         # AI quick actions
+        ai_status = ft.Row([
+            ft.ProgressRing(width=16, height=16, stroke_width=2,
+                            color=Palette.PRIMARY),
+            T("هوش مصنوعی در حال نوشتن است...", size=12,
+              color=Palette.PRIMARY),
+        ], spacing=8, tight=True, visible=False)
+        ai_busy = {"running": False}
         ai_row = ft.Row([
             ft.Container(
                 content=T(label, size=12, color=Palette.PRIMARY,
@@ -2119,9 +2126,14 @@ class App:
         title_f.on_change = _refresh_preview
 
         async def _run_ai(action: str):
+            if ai_busy["running"]:
+                return
             src = (body_f.value or "").strip() or (title_f.value or "").strip()
             if not src and action != "create":
                 return self.toast("متنی برای پردازش وارد کنید", error=True)
+            ai_busy["running"] = True
+            ai_status.visible = True
+            self.page.update()
             try:
                 result = await self.api.ai(action, src)
                 body_f.value = result
@@ -2129,6 +2141,13 @@ class App:
                 self.toast("آماده شد")
             except ApiError as e:
                 self.toast(str(e), error=True)
+            except Exception:
+                logger.exception("AI composer action failed")
+                self.toast("ارتباط با هوش مصنوعی ناموفق بود؛ متن قبلی حفظ شد.", error=True)
+            finally:
+                ai_busy["running"] = False
+                ai_status.visible = False
+                self.page.update()
 
         async def save_draft(_=None):
             text = (body_f.value or "").strip()
@@ -2222,6 +2241,7 @@ class App:
                     body_f,
                     T("ابزارهای هوشمند", size=13,
                       weight=ft.FontWeight.W_600, color=Palette.TEXT),
+                    ai_status,
                     ai_row,
                     T("کانال‌ها", size=13,
                       weight=ft.FontWeight.W_600, color=Palette.TEXT),
