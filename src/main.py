@@ -1808,8 +1808,18 @@ class App:
         ):
             return
         try:
-            await self.api.delete(f"/posts/{post['id']}/remote-delete")
-            self.toast("پیام از کانال حذف شد")
+            result = await self.api.delete(
+                f"/posts/{post['id']}/remote-delete"
+            )
+            if isinstance(result, dict) and result.get("ok") is False:
+                count = result.get("deleted_channels", 0)
+                total = result.get("total_channels", 0)
+                self.toast(
+                    f"حذف کامل نشد؛ {digits(count)} از {digits(total)} کانال حذف شد. جزئیات انتشار را بررسی کن.",
+                    error=True,
+                )
+            else:
+                self.toast("پیام از کانال حذف شد")
             await self.go("posts")
         except ApiError as e:
             self.toast(str(e), error=True)
