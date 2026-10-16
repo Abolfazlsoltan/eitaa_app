@@ -1639,6 +1639,32 @@ class App:
                         self._corrected_copy(p)
                     ),
                 ))
+                deliveries = post.get("deliveries", [])
+                can_manage_remote = (
+                    self.api.online and bool(deliveries)
+                    and all(
+                        d.get("status") == "published"
+                        and d.get("remote_message_id")
+                        for d in deliveries
+                    )
+                )
+                if can_manage_remote:
+                    actions.extend([
+                        ft.TextButton(
+                            "ویرایش در کانال",
+                            icon=ft.Icons.EDIT_OUTLINED,
+                            on_click=lambda e, p=post: self.spawn(
+                                self._edit_published_message(p)
+                            ),
+                        ),
+                        ft.TextButton(
+                            "حذف از کانال",
+                            icon=ft.Icons.DELETE_OUTLINE,
+                            on_click=lambda e, p=post: self.spawn(
+                                self._delete_published_message(p)
+                            ),
+                        ),
+                    ])
             body.append(ft.Row(
                 actions, alignment=ft.MainAxisAlignment.END
             ))
@@ -1737,6 +1763,57 @@ class App:
             await self.go("posts", "draft")
         except ApiError as e:
             self.toast(str(e), error=True)
+
+    async def _edit_published_message(self, post: dict):
+        """Edit the real remote message; never imply a local-only edit is enough."""
+        field = tf("متن جدید پیام", value=post.get("text", ""), multiline=True,
+                   min_lines=6, max_lines=14, expand=True)
+        future = self.loop.create_future()
+
+        def close(result):
+            def handler(e):
+                if not future.done():
+                    future.set_result(result)
+                self.page.pop_dialog()
+            return handler
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=T("ویرایش پیام منتشرشده"),
+            content=ft.Container(content=field, width=520),
+            actions=[
+                ft.TextButton("انصراف", on_click=close(False)),
+                ft.FilledButton("ذخیره در کانال", icon=ft.Icons.CHECK,
+                                on_click=close(True)),
+            ],
+        ))
+        if not await future:
+            return
+        if not field.value or not field.value.strip():
+            self.toast("متن پیام نمی‌تواند خالی باشد", error=True)
+            return
+        try:
+            result = await self.api.put(
+                f"/posts/{post['id']}/remote-edit",
+                {"text": field.value},
+            )
+            self.toast("پیام در کانال ویرایش شد")
+            await self.go("posts")
+        except ApiError as e:
+            self.toast(str(e), error=True)
+
+    async def _delete_published_message(self, post: dict):
+        if not await self.confirm(
+            "این کار تلاش می‌کند پیام واقعی را از کانال ایتا حذف کند، نه فقط از فهرست برنامه. ادامه می‌دهی؟"
+        ):
+            return
+        try:
+            await self.api.delete(f"/posts/{post['id']}/remote-delete")
+            self.toast("پیام از کانال حذف شد")
+            await self.go("posts")
+        except ApiError as e:
+            self.toast(str(e), error=True)
+
 
     async def v_channel_history(self, channel_id: int):
         channel = next(
