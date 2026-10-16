@@ -981,10 +981,46 @@ class Api:
         if not channel:
             raise ApiError("کانال انتخاب‌شده پیدا نشد.")
         username = str(channel.get("chat_id") or "").strip().lstrip("@")
+        archive = await self._load("public_history", {})
+        key = str(channel_id)
+        previous = archive.get(key, []) if isinstance(archive, dict) else []
+        previous_by_id = {
+            int(item["source_post_id"]): item
+            for item in previous
+            if isinstance(item, dict)
+            and str(item.get("source_post_id", "")).isdigit()
+        }
         try:
-            return await fetch_public_channel_history(username, limit=100)
+            fresh = await fetch_public_channel_history(username, limit=100)
         except PublicHistoryError as exc:
+            if previous_by_id:
+                return [
+                    {**item, "is_stale": True}
+                    for item in sorted(
+                        previous_by_id.values(),
+                        key=lambda item: int(item["source_post_id"]),
+                        reverse=True,
+                    )[:100]
+                ]
             raise ApiError(str(exc), retryable=True) from exc
+
+        for item in fresh:
+            previous_by_id[int(item["source_post_id"])] = {
+                **item,
+                "channel_id": channel_id,
+                "channel_title": channel.get("title") or username,
+                "is_stale": False,
+            }
+        archived = sorted(
+            previous_by_id.values(),
+            key=lambda item: int(item["source_post_id"]),
+            reverse=True,
+        )[:500]
+        if not isinstance(archive, dict):
+            archive = {}
+        archive[key] = archived
+        await self._save("public_history", archive)
+        return archived[:100]
 
     async def _device_history(self, params: dict) -> list[dict]:
         posts = await self._load("posts", [])
