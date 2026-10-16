@@ -33,7 +33,7 @@ def markdown_to_html(value: str) -> str:
     source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
     source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
     source = re.sub(r"(?m)^\s*\d+[.)]\s+(.+)$", r"\1", source)
-    source = source.replace("\n", "<br>")
+    source = source.replace("\n", "\n")
     for index, code in enumerate(code_blocks):
         source = source.replace(f"\x00CODE{index}\x00", f"<pre>{code}</pre>")
     return source
