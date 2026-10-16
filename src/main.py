@@ -1134,7 +1134,34 @@ class App:
                 subtitle=jdate(dt.datetime.now()),
                 actions=[self._header_icon(ft.Icons.CAMPAIGN)],
             ),
-            ft.Container(height=24),
+            ft.Container(height=12),
+
+            # ---- branded hero artwork ----
+            ft.Container(
+                content=ft.Column([
+                    ft.Image(
+                        src="assets/hero_dashboard.svg",
+                        height=172,
+                    ),
+                    T("مدیریت هوشمند کانال‌ها", size=17,
+                      weight=ft.FontWeight.BOLD, color=Palette.TEXT),
+                    T("انتشار، زمان‌بندی و آرشیو؛ همه در یک‌جا.",
+                      size=12, color=Palette.MUTED,
+                      text_align=ft.TextAlign.CENTER),
+                    ft.Container(height=2),
+                    btn_primary(
+                        "ساخت اولین پست",
+                        lambda e: self.spawn(self.go("new")),
+                    ),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                   spacing=7),
+                margin=ft.Margin.symmetric(horizontal=16),
+                padding=ft.Padding.symmetric(horizontal=14, vertical=14),
+                border_radius=24,
+                bgcolor=Palette.CARD,
+                border=ft.Border.all(1, Palette.BORDER),
+            ),
+            ft.Container(height=18),
 
             # ---- stats grid ----
             ft.Container(
