@@ -159,9 +159,9 @@ def parse_public_channel_html(username: str, html_text: str) -> list[dict[str, A
 
 
 async def fetch_public_channel_history(
-    username: str, *, limit: int = 100, max_pages: int = 5,
+    username: str, *, limit: int = 200, max_pages: int = 10,
 ) -> list[dict[str, Any]]:
-    """Fetch up to 100 recent posts from a public username channel."""
+    """Fetch up to 200 recent posts from a public username channel."""
     if not _CHANNEL_RE.fullmatch(username or ""):
         raise PublicHistoryError(
             "برای خواندن تاریخچهٔ عمومی، کانال باید شناسهٔ متنی داشته باشد."
