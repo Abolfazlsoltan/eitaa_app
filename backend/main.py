@@ -39,6 +39,7 @@ from .db import (
     Delivery,
     Feedback,
     MediaAsset,
+    PublicChannelPost,
     Post,
     PostRevision,
     RemovalReminder,
@@ -615,16 +616,106 @@ async def public_channel_history(
     channel_id: int = Query(..., ge=1),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    """Read public channel posts from Eitaa's web view, not only app sends."""
+    """Fetch public posts and persist them so later deletions do not erase history."""
     with Session() as s:
         channel = s.get(Channel, channel_id)
         if not channel:
             raise HTTPException(404, "کانال پیدا نشد.")
         username = str(channel.chat_id or "").strip().lstrip("@")
+        channel_title = channel.title or username
+
     try:
-        return await fetch_public_channel_history(username, limit=limit)
+        fresh = await fetch_public_channel_history(username, limit=limit)
     except PublicHistoryError as exc:
-        raise HTTPException(502, str(exc)) from exc
+        with Session() as s:
+            archived = s.scalars(
+                select(PublicChannelPost)
+                .where(PublicChannelPost.channel_id == channel_id)
+                .order_by(PublicChannelPost.remote_message_id.desc())
+                .limit(limit)
+            ).all()
+            if not archived:
+                raise HTTPException(502, str(exc)) from exc
+            return [{
+                "id": f"eitaa:{username}:{item.remote_message_id}",
+                "source_post_id": item.remote_message_id,
+                "source_url": item.source_url,
+                "source": "eitaa_public",
+                "is_external": True,
+                "is_stale": True,
+                "title": "",
+                "text": item.text,
+                "status": "published",
+                "created_at": item.published_at,
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "channel_username": username,
+                "views": item.views,
+                "deliveries": [{
+                    "channel_id": channel_id,
+                    "channel_title": channel_title,
+                    "status": "published",
+                    "remote_message_id": item.remote_message_id,
+                    "done_at": item.published_at,
+                }],
+            } for item in archived]
+
+    with Session.begin() as s:
+        for item in fresh:
+            remote_id = int(item["source_post_id"])
+            record = s.scalar(
+                select(PublicChannelPost).where(
+                    PublicChannelPost.channel_id == channel_id,
+                    PublicChannelPost.remote_message_id == remote_id,
+                )
+            )
+            if record is None:
+                record = PublicChannelPost(
+                    channel_id=channel_id,
+                    remote_message_id=remote_id,
+                    text=item.get("text", ""),
+                    published_at=item.get("created_at", ""),
+                    source_url=item.get("source_url", ""),
+                    views=item.get("views"),
+                )
+                s.add(record)
+            else:
+                record.text = item.get("text", "")
+                record.published_at = item.get("created_at", "")
+                record.source_url = item.get("source_url", "")
+                record.views = item.get("views")
+            record.last_seen_at = now()
+
+    with Session() as s:
+        archived = s.scalars(
+            select(PublicChannelPost)
+            .where(PublicChannelPost.channel_id == channel_id)
+            .order_by(PublicChannelPost.remote_message_id.desc())
+            .limit(min(limit, 500))
+        ).all()
+        return [{
+            "id": f"eitaa:{username}:{item.remote_message_id}",
+            "source_post_id": item.remote_message_id,
+            "source_url": item.source_url,
+            "source": "eitaa_public",
+            "is_external": True,
+            "is_stale": False,
+            "title": "",
+            "text": item.text,
+            "status": "published",
+            "created_at": item.published_at,
+            "channel_id": channel_id,
+            "channel_title": channel_title,
+            "channel_username": username,
+            "views": item.views,
+            "deliveries": [{
+                "channel_id": channel_id,
+                "channel_title": channel_title,
+                "status": "published",
+                "remote_message_id": item.remote_message_id,
+                "done_at": item.published_at,
+            }],
+        } for item in archived]
 
 
 @app.get("/api/posts/{pid}/revisions")
