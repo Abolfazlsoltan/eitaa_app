@@ -2041,8 +2041,8 @@ class App:
 
         now = dt.datetime.now()
         date_picker = ft.DatePicker(
-            first_date=now.date(),
-            last_date=(now + dt.timedelta(days=30)).date(),
+            first_date=now,
+            last_date=now + dt.timedelta(days=30),
             on_change=None,
         )
         time_picker = ft.TimePicker(on_change=None)
