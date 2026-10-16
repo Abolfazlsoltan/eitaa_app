@@ -110,6 +110,7 @@ class ClientDeviceModeTests(unittest.TestCase):
             def __init__(self, storage, **kwargs):
                 self.storage = storage
                 self.calls = []
+                self.payloads = []
 
             async def __aenter__(self):
                 return self
@@ -119,6 +120,7 @@ class ClientDeviceModeTests(unittest.TestCase):
 
             async def post(self, url, data):
                 self.calls.append(data["chat_id"])
+                self.payloads.append(dict(data))
                 saved = json.loads(await self.storage.get("data:posts"))
                 delivery = next(
                     d for d in saved[0]["deliveries"]
@@ -147,6 +149,7 @@ class ClientDeviceModeTests(unittest.TestCase):
                     "text": "hello",
                     "mode": "now",
                     "channel_ids": [1, 2],
+                    "view_to_delete": 99,
                 })
 
             self.assertEqual(result["status"], "partial")
@@ -159,6 +162,8 @@ class ClientDeviceModeTests(unittest.TestCase):
             self.assertEqual(saved["deliveries"][0]["remote_message_id"], 55)
             self.assertIn("good", fake_clients[0].calls)
             self.assertIn("bad", fake_clients[0].calls)
+            self.assertEqual(fake_clients[0].payloads[0]["viewCountForDelete"], 99)
+            self.assertNotIn("view_to_delete", fake_clients[0].payloads[0])
 
         asyncio.run(run())
 
