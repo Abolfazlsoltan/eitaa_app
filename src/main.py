@@ -1836,6 +1836,39 @@ class App:
 
         def rebuild():
             list_view.controls.clear()
+            if not self.chat_messages:
+                list_view.controls.append(ft.Container(
+                    content=ft.Column([
+                        ft.Icon(
+                            ft.Icons.AUTO_AWESOME,
+                            size=34,
+                            color=Palette.PRIMARY,
+                        ),
+                        T("دستیار محتوای ایتا", size=19,
+                          weight=ft.FontWeight.BOLD, color=Palette.TEXT),
+                        T(
+                            "موضوع پست یا خواسته‌ات را بنویس؛ "
+                            "پاسخ همین‌جا نمایش داده می‌شود.",
+                            size=13, color=Palette.MUTED,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        ft.Divider(height=8, color=Palette.BORDER),
+                        T("مثال برای شروع:", size=12,
+                          weight=ft.FontWeight.W_600, color=Palette.TEXT),
+                        T("• یک پست معرفی محصول بنویس", size=12,
+                          color=Palette.MUTED),
+                        T("• این متن را کوتاه‌تر و جذاب‌تر کن", size=12,
+                          color=Palette.MUTED),
+                        T("• برای یک خبر فناوری، کپشن بنویس", size=12,
+                          color=Palette.MUTED),
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                       spacing=10, tight=True),
+                    padding=24,
+                    margin=ft.Margin.all(12),
+                    border_radius=20,
+                    bgcolor=Palette.CARD,
+                    border=ft.Border.all(1, Palette.BORDER),
+                ))
             for msg in self.chat_messages[-config.CHAT_HISTORY_LIMIT:]:
                 is_user = msg.get("role") == "user"
                 bubble_bg = Palette.PRIMARY if is_user else Palette.CARD
@@ -1948,7 +1981,7 @@ class App:
 
             try:
                 reply = await self.api.ai(
-                    "create", text, prompt=text, on_chunk=on_chunk,
+                    "create", text, on_chunk=on_chunk,
                 )
             except ApiError as e:
                 # Keep the user's text recoverable and offer a one-tap retry.
