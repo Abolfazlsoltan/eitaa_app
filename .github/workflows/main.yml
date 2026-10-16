@@ -79,6 +79,16 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "flet[all]==1.0.4"
 
+      # The repository keeps the original brand icon at the root. Flet expects
+      # app assets relative to the configured src/ app path, so stage the exact
+      # same image there before generating Android launcher/splash assets.
+      - name: Stage app icon for Flet
+        run: |
+          set -euo pipefail
+          test -s assets/icon.png
+          mkdir -p src/assets
+          cp assets/icon.png src/assets/icon.png
+
       - name: Build APK
         shell: bash
         env:
