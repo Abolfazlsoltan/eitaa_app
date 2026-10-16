@@ -2165,6 +2165,8 @@ class App:
                 show_form_error(self._safe_message(str(exc)))
 
         async def save_draft(_=None):
+            if state["busy"]:
+                return
             text = (body_f.value or "").strip()
             if not text:
                 show_form_error("برای ذخیره پیش‌نویس، متن پست را وارد کنید.")
@@ -2175,6 +2177,7 @@ class App:
                 "mode": "draft",
                 "channel_ids": list(state["selected"]),
             }
+            state["busy"] = True
             try:
                 if post_id is not None:
                     await self.api.put(f"/posts/{post_id}", payload)
@@ -2184,8 +2187,12 @@ class App:
                 await self.go("posts", "draft")
             except ApiError as exc:
                 show_form_error(self._safe_message(str(exc)))
+            finally:
+                state["busy"] = False
 
         async def publish_now(_=None):
+            if state["busy"]:
+                return
             text = (body_f.value or "").strip()
             if not text:
                 show_form_error("متن پست خالی است.")
@@ -2199,6 +2206,7 @@ class App:
                 "mode": "now",
                 "channel_ids": list(state["selected"]),
             }
+            state["busy"] = True
             try:
                 if post_id is not None:
                     await self.api.put(f"/posts/{post_id}", payload)
@@ -2208,8 +2216,12 @@ class App:
                 await self.go("posts")
             except ApiError as exc:
                 show_form_error(self._safe_message(str(exc)))
+            finally:
+                state["busy"] = False
 
         async def schedule(_=None):
+            if state["busy"]:
+                return
             if not scheduling_available:
                 show_form_error("زمان‌بندی خودکار در حال حاضر فعال نیست؛ برای استفاده از آن باید به سرور متصل شوید.")
                 return
@@ -2244,6 +2256,7 @@ class App:
                 "channel_ids": list(state["selected"]),
                 "scheduled_at": to_utc_iso(when),
             }
+            state["busy"] = True
             try:
                 if post_id is not None:
                     await self.api.put(f"/posts/{post_id}", payload)
@@ -2253,6 +2266,8 @@ class App:
                 await self.go("posts", "scheduled")
             except ApiError as exc:
                 show_form_error(self._safe_message(str(exc)))
+            finally:
+                state["busy"] = False
 
         header = self.gradient_header(
             "ویرایش پست" if post else "پست جدید",
