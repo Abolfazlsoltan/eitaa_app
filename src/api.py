@@ -1168,12 +1168,24 @@ class Api:
             ],
         }
 
-        if mode == "now":
-            await self._publish(post)
-
+        # Save before network I/O so delivery progress survives interruptions.
         posts.insert(0, post)
         await self._save("posts", posts[:config.POSTS_LIMIT])
+        if mode == "now":
+            await self._publish(post)
+            await self._persist_post_progress(post)
         return {"id": new_id, "status": post["status"]}
+
+    async def _persist_post_progress(self, post: dict) -> None:
+        """Persist per-channel progress while preserving other saved posts."""
+        posts = await self._load("posts", [])
+        for index, saved in enumerate(posts):
+            if saved.get("id") == post.get("id"):
+                posts[index] = post
+                break
+        else:
+            posts.insert(0, post)
+        await self._save("posts", posts[:config.POSTS_LIMIT])
 
     async def _publish(self, post: dict) -> None:
         token = await self.storage.get("token") or config.EITAA_TOKEN
@@ -1188,10 +1200,23 @@ class Api:
 
         async with httpx.AsyncClient(timeout=60) as c:
             for d in post["deliveries"]:
+                # Never resend a channel that has already been published or
+                # attempted. Uncertain outcomes need human review first.
+                if d.get("status") not in ("queued", "scheduled"):
+                    if d.get("status") == "published":
+                        success += 1
+                    continue
+
                 ch = channels.get(d["channel_id"])
                 if not ch:
                     d["status"], d["error"] = "failed", "کانال یافت نشد"
+                    await self._persist_post_progress(post)
                     continue
+
+                # Persist the in-flight state before the external request.
+                d["status"] = "sending"
+                d["error"] = ""
+                await self._persist_post_progress(post)
 
                 message_text = post["text"].strip()
                 signature = (post.get("signature") or "").strip()
@@ -1214,7 +1239,14 @@ class Api:
                                      data=payload)
                     j = r.json()
                 except (httpx.HTTPError, ValueError):
-                    d["status"], d["error"] = "failed", "خطای ارتباط"
+                    # A timeout does not prove that Eitaa rejected the message.
+                    # Do not blindly retry a potentially successful send.
+                    d["status"] = "failed"
+                    d["error"] = (
+                        "نتیجه ارسال نامشخص است؛ پیش از تلاش دوباره، "
+                        "کانال را بررسی کنید."
+                    )
+                    await self._persist_post_progress(post)
                     continue
 
                 if (r.status_code == 200 and isinstance(j, dict)
@@ -1234,6 +1266,7 @@ class Api:
                         else None
                     )
                     success += 1
+                    await self._persist_post_progress(post)
                 else:
                     d["status"] = "failed"
                     if isinstance(j, dict):
@@ -1245,12 +1278,25 @@ class Api:
                     else:
                         error = "پاسخ نامعتبر از ایتا"
                     d["error"] = _mask_secret(error, token)
+                    await self._persist_post_progress(post)
 
-        post["status"] = "published" if success else "failed"
+        statuses = [d.get("status") for d in post.get("deliveries", [])]
+        published_count = sum(status == "published" for status in statuses)
+        if statuses and published_count == len(statuses):
+            post["status"] = "published"
+        elif published_count:
+            post["status"] = "partial"
+        elif any(status == "sending" for status in statuses):
+            post["status"] = "sending"
+        else:
+            post["status"] = "failed"
+        await self._persist_post_progress(post)
         await self._log(
             "publish" if post["status"] == "published" else "error",
             f"«{post['title'] or post['id']}» "
-            + ("منتشر شد" if post["status"] == "published" else "منتشر نشد"),
+            + ("منتشر شد" if post["status"] == "published"
+               else "نیازمند بررسی ارسال است" if post["status"] == "partial"
+               else "منتشر نشد"),
         )
 
     async def _cancel_post(self, post_id: int) -> dict:
@@ -1342,9 +1388,10 @@ class Api:
         })
         post["status"] = {"draft": "draft", "now": "queued",
                           "schedule": "scheduled"}[mode]
+        await self._save("posts", posts)
         if mode == "now":
             await self._publish(post)
-        await self._save("posts", posts)
+            await self._persist_post_progress(post)
         return {"id": post_id, "status": post["status"]}
 
     async def _delete_draft(self, post_id: int) -> dict:
