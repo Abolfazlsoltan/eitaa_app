@@ -201,7 +201,9 @@ async def fetch_public_channel_history(
                     break
                 if before_id is not None and next_before >= before_id:
                     break
-                before_id = next_before
+                if next_before <= 1:
+                    break
+                before_id = next_before - 1
                 await asyncio.sleep(0.12)
     except PublicHistoryError:
         raise
