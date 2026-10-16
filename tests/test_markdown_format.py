@@ -25,7 +25,7 @@ class MarkdownPublishingTests(unittest.TestCase):
 
     def test_real_hashtag_is_preserved_and_heading_marker_removed(self):
         source = "# تیتر\nخبر #فناوری"
-        expected = "<b>تیتر</b><br>خبر #فناوری"
+        expected = "<b>تیتر</b>\nخبر #فناوری"
         self.assertEqual(_markdown_to_eitaa_html(source), expected)
         self.assertEqual(markdown_to_html(source), expected)
 
