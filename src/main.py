@@ -80,6 +80,7 @@ ST = {
     "queued": "در صف",
     "sending": "در حال ارسال",
     "published": "منتشرشده",
+    "partial": "ارسال ناقص",
     "failed": "ناموفق",
     "cancelled": "لغوشده",
 }
@@ -91,6 +92,7 @@ ST_COLOR = {
     "queued": Palette.WARNING,
     "sending": Palette.WARNING,
     "published": Palette.SUCCESS,
+    "partial": Palette.WARNING,
     "failed": Palette.DANGER,
     "cancelled": "#94A3B8",
 }
