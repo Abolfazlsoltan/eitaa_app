@@ -1329,13 +1329,31 @@ def add_auto(b: AutoIn, request: Request):
         raise HTTPException(400, "نام، کانال و متن یا قالب الزامی است.")
     if b.trigger not in ("daily", "weekly", "interval"):
         raise HTTPException(400, "نوع محرک نامعتبر است.")
-    if not re.match(r"^\d\d:\d\d$", b.at_time):
-        raise HTTPException(400, "قالب ساعت باید HH:MM باشد.")
+    try:
+        parsed_time = dt.datetime.strptime(b.at_time, "%H:%M").time()
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ساعت باید بین 00:00 تا 23:59 باشد.")
+    if parsed_time.strftime("%H:%M") != b.at_time:
+        raise HTTPException(400, "ساعت باید با قالب HH:MM باشد.")
+    if b.trigger == "interval" and not 1 <= b.interval_min <= 10080:
+        raise HTTPException(400, "فاصله اجرا باید بین ۱ تا ۱۰۰۸۰ دقیقه باشد.")
+    if any(day not in range(7) for day in b.weekdays):
+        raise HTTPException(400, "روز هفته نامعتبر است.")
     if b.trigger == "weekly" and not b.weekdays:
         raise HTTPException(400, "حداقل یک روز هفته انتخاب کنید.")
+    if len(b.channel_ids) != len(set(b.channel_ids)):
+        raise HTTPException(400, "کانال تکراری انتخاب شده است.")
     if not b.require_approval and not auth.can(request.state.user.role, "publish"):
         raise HTTPException(403, "انتشار بدون تأیید نیازمند دسترسی انتشار است.")
     with Session() as s:
+        requested_channels = set(b.channel_ids)
+        available_channels = set(s.scalars(
+            select(Channel.id).where(Channel.id.in_(requested_channels))
+        ))
+        if available_channels != requested_channels:
+            raise HTTPException(400, "یکی از کانال‌های انتخاب‌شده پیدا نشد.")
+        if b.template_id is not None and not s.get(Template, b.template_id):
+            raise HTTPException(404, "قالب انتخاب‌شده پیدا نشد.")
         a = Automation(
             name=b.name, trigger=b.trigger, at_time=b.at_time,
             weekdays=",".join(map(str, b.weekdays)),
@@ -1529,7 +1547,6 @@ RULES = [
     (("POST",), r"^/api/removal-reminders/\d+/(cancel|reschedule)", "edit"),
     (("POST",), r"^/api/(connections|channels)", "owner"),
     (("GET",), r"^/api/analytics", "analytics"),
-    (("POST",), r"^/api/posts$", "edit"),
     (("PUT", "DELETE"), r"^/api/posts/\d+$", "edit"),
     (("POST",), r"^/api/posts/\d+/publish$", "publish"),
     (("POST",), r"^/api/(posts/\d+/(cancel|reschedule)|deliveries/\d+/retry)", "publish"),
@@ -1553,6 +1570,17 @@ async def guard(request: Request, call_next):
     if not u:
         return JSONResponse({"detail": "ابتدا وارد شوید."}, status_code=401)
     request.state.user = u
+
+    # POST /api/posts chooses its permission from the submitted mode inside
+    # create_post(): drafts require "edit", while immediate/scheduled posts
+    # require "publish". The middleware must allow either capability to reach
+    # that endpoint-level check; otherwise publishers are blocked before it.
+    if request.method == "POST" and path == "/api/posts":
+        if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
+            return JSONResponse(
+                {"detail": "دسترسی لازم برای این عملیات را ندارید."},
+                status_code=403,
+            )
 
     matched_rule = False
     for methods, rx, perm in RULES:
