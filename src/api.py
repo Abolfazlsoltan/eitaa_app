@@ -1121,6 +1121,21 @@ class Api:
         channel_ids = list(body.get("channel_ids") or [])
         if mode != "draft" and not channel_ids:
             raise ApiError("حداقل یک کانال انتخاب کنید.")
+        if any(
+            not isinstance(cid, int) or isinstance(cid, bool) or cid < 1
+            for cid in channel_ids
+        ):
+            raise ApiError("شناسه یکی از کانال‌های انتخاب‌شده معتبر نیست.")
+        if len(channel_ids) != len(set(channel_ids)):
+            raise ApiError("یک کانال بیش از یک بار انتخاب شده است.")
+        if channel_ids:
+            channels = await self._load("channels", [])
+            available_ids = {
+                ch.get("id") for ch in channels
+                if isinstance(ch, dict) and isinstance(ch.get("id"), int)
+            }
+            if any(cid not in available_ids for cid in channel_ids):
+                raise ApiError("یکی از کانال‌های انتخاب‌شده دیگر در دسترس نیست.")
 
         posts = await self._load("posts", [])
         new_id = max((p.get("id", 0) for p in posts), default=0) + 1
