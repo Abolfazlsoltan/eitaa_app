@@ -111,3 +111,26 @@ async def send_file(
         p["reply_to_message_id"] = reply_to_message_id
     with open(path, "rb") as f:
         return await _call(token, "sendDocument", files={"file": (filename, f)}, **p)
+
+
+async def edit_message(token: str, chat_id: str, message_id: int, text: str, *, caption: bool = False):
+    """Try editing a previously sent message through the EitaaYar bot API.
+
+    The public EitaaYar reference currently documents send/get methods only;
+    these method names are attempted as a capability check and may be rejected
+    by the provider. Callers must surface that failure rather than pretending
+    the remote channel was updated.
+    """
+    method = "editMessageCaption" if caption else "editMessageText"
+    field = "caption" if caption else "text"
+    return await _call(
+        token, method, chat_id=chat_id, message_id=int(message_id),
+        **{field: markdown_to_html(text), "parse_mode": "HTML"},
+    )
+
+
+async def delete_message(token: str, chat_id: str, message_id: int):
+    """Try deleting a previously sent message; provider support is not guaranteed."""
+    return await _call(
+        token, "deleteMessage", chat_id=chat_id, message_id=int(message_id)
+    )
