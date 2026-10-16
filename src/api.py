@@ -57,7 +57,7 @@ def _markdown_to_eitaa_html(value: str) -> str:
     source = re.sub(r"(?s)\x60([^\n\x60]+)\x60", lambda m: f"<code>{m.group(1)}</code>", source)
     source = re.sub(r"(?m)^#{1,6}[ \t]+(.+)$", r"<b>\1</b>", source)
     source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", source)
-    source = re.sub(r"\\*([^*\\n]+)\\*|_([^_\\n]+)_", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
+    source = re.sub(r"\*([^*\n]+)\*|_([^_\n]+)_", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
     source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
     source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
     source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
