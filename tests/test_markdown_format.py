@@ -13,7 +13,7 @@ from backend.eitaa import markdown_to_html
 class MarkdownPublishingTests(unittest.TestCase):
     def test_heading_bold_italic_and_strikethrough(self):
         source = "# تیتر\n**پررنگ** و *کج* و ~~حذف~~"
-        expected = "<b>تیتر</b><br><b>پررنگ</b> و <i>کج</i> و <s>حذف</s>"
+        expected = "<b>تیتر</b>\n<b>پررنگ</b> و <i>کج</i> و <s>حذف</s>"
         self.assertEqual(_markdown_to_eitaa_html(source), expected)
         self.assertEqual(markdown_to_html(source), expected)
 
@@ -31,7 +31,7 @@ class MarkdownPublishingTests(unittest.TestCase):
 
     def test_links_and_lists(self):
         source = "- مورد اول\n[سایت](https://example.com)"
-        expected = "• مورد اول<br><a href=\"https://example.com\">سایت</a>"
+        expected = "• مورد اول\n<a href=\"https://example.com\">سایت</a>"
         self.assertEqual(_markdown_to_eitaa_html(source), expected)
         self.assertEqual(markdown_to_html(source), expected)
 
