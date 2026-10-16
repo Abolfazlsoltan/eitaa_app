@@ -248,11 +248,14 @@ class AnonymousAI:
                     provider, type(exc).__name__,
                 )
 
-        logger.warning("All streaming AI providers failed (%d attempts).", len(failures))
-        raise AIServiceError(
-            "دستیار هوشمند در حال حاضر پاسخگو نیست. "
-            "اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
+        logger.info(
+            "Streaming was unavailable on all routes (%d attempts); "
+            "falling back to standard completion.",
+            len(failures),
         )
+        # Some compatible gateways accept normal completions but reject SSE.
+        # Preserve functionality in that case; the UI has a progressive fallback.
+        return await self.complete(system, user)
 
     # ---------------------------------------------------- provider paths ---
     async def _complete_pollinations(self, system: str, user: str) -> str:
