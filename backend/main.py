@@ -223,6 +223,11 @@ def _refresh_post(s, post_id: int) -> None:
         p.status = "scheduled"
     elif statuses == {"published"}:
         p.status = "published"
+    elif "published" in statuses:
+        # At least one destination succeeded but not every destination did.
+        # Keep that distinction visible instead of incorrectly calling it a
+        # total failure in the post list and analytics.
+        p.status = "partial"
     else:
         p.status = "failed"
 
