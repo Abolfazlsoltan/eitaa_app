@@ -1579,7 +1579,7 @@ async def guard(request: Request, call_next):
     # disabled. The broad automation-management rule intentionally excludes
     # this route so it cannot reject publishers before that check.
     matched_rule = False
-    if request.method == "POST" and re.fullmatch(r"/api/automations/\\d+/run", path):
+    if request.method == "POST" and re.fullmatch(r"/api/automations/\d+/run", path):
         if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
             return JSONResponse(
                 {"detail": "دسترسی لازم برای این عملیات را ندارید."},
@@ -1587,10 +1587,10 @@ async def guard(request: Request, call_next):
             )
         matched_rule = True
 
-    # POST /api/posts chooses its permission from the submitted mode inside    # create_post(): drafts require "edit", while immediate/scheduled posts
+    # POST /api/posts chooses its permission from the submitted mode inside
+    # create_post(): drafts require "edit", while immediate/scheduled posts
     # require "publish". The middleware must allow either capability to reach
     # that endpoint-level check; otherwise publishers are blocked before it.
-    matched_rule = False
     if request.method == "POST" and path == "/api/posts":
         if not (auth.can(u.role, "edit") or auth.can(u.role, "publish")):
             return JSONResponse(
