@@ -1191,8 +1191,16 @@ class Api:
         token = await self.storage.get("token") or config.EITAA_TOKEN
         if not token:
             for d in post["deliveries"]:
-                d["status"], d["error"] = "failed", "اتصال به ایتا برقرار نشده"
-            post["status"] = "failed"
+                if d.get("status") in ("queued", "scheduled"):
+                    d["status"] = "failed"
+                    d["error"] = "اتصال به ایتا برقرار نشده"
+            post["status"] = (
+                "partial"
+                if any(d.get("status") == "published"
+                       for d in post["deliveries"])
+                else "failed"
+            )
+            await self._persist_post_progress(post)
             return
 
         channels = {c["id"]: c for c in await self._load("channels", [])}
