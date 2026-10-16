@@ -38,32 +38,33 @@ import config
 
 
 def _markdown_to_eitaa_html(value: str) -> str:
-    """Convert the safe, common Markdown subset to Eitaa Bot API HTML.
-
-    Escape source text first so user-provided HTML is never passed through.
-    Unsupported Markdown is left readable rather than silently deleted.
-    """
+    """Convert common Markdown safely without interpreting markers inside code or links."""
     import html
     import re
 
     source = html.escape(str(value or ""), quote=True)
-    code_blocks = []
+    protected = []
 
-    def hold_code(match):
-        code_blocks.append(match.group(1))
-        return f"\x00CODE{len(code_blocks) - 1}\x00"
+    def hold(value):
+        protected.append(value)
+        return f"\x00P{len(protected) - 1}\x00"
 
-    source = re.sub(r"(?s)\x60\x60\x60(?:[A-Za-z0-9_+.-]+)?[ \t]*\n(.*?)\x60\x60\x60", hold_code, source)
-    source = re.sub(r"(?s)\x60([^\n\x60]+)\x60", lambda m: f"<code>{m.group(1)}</code>", source)
+    source = re.sub(r"(?s)\x60\x60\x60(?:[A-Za-z0-9_+.-]+)?[ \t]*\n(.*?)\x60\x60\x60", lambda m: hold("<pre>" + m.group(1) + "</pre>"), source)
+    source = re.sub(r"\x60([^\n\x60]+)\x60", lambda m: hold("<code>" + m.group(1) + "</code>"), source)
+
+    def link(match):
+        return hold('<a href="' + match.group(2) + '">' + match.group(1) + "</a>")
+
+    source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", link, source)
     source = re.sub(r"(?m)^#{1,6}[ \t]+(.+)$", r"<b>\1</b>", source)
-    source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", source)
-    source = re.sub(r"\*([^*\n]+)\*|_([^_\n]+)_", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
+    source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: "<b>" + (m.group(1) or m.group(2)) + "</b>", source)
+    source = re.sub(r"(?<!\\)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)", lambda m: "<i>" + (m.group(1) or m.group(2)) + "</i>", source)
     source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
-    source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
     source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
     source = re.sub(r"(?m)^\s*\d+[.)]\s+(.+)$", r"\1", source)
-    for index, code in enumerate(code_blocks):
-        source = source.replace(f"\x00CODE{index}\x00", f"<pre>{code}</pre>")
+
+    for index, value in enumerate(protected):
+        source = source.replace(f"\x00P{index}\x00", value)
     return source
 
 
