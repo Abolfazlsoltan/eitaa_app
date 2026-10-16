@@ -1298,7 +1298,7 @@ class Api:
                 if post["pin"]:
                     payload["pin"] = 1
                 if post.get("view_to_delete") is not None:
-                    payload["view_to_delete"] = post["view_to_delete"]
+                    payload["viewCountForDelete"] = post["view_to_delete"]
                 if post.get("reply_to_message_id") is not None:
                     payload["reply_to_message_id"] = post["reply_to_message_id"]
 
