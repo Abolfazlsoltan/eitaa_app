@@ -21,6 +21,37 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime as dt
+
+def _markdown_to_eitaa_html(value: str) -> str:
+    """Convert the safe, common Markdown subset to Eitaa Bot API HTML.
+
+    Escape source text first so user-provided HTML is never passed through.
+    Unsupported Markdown is left readable rather than silently deleted.
+    """
+    import html
+    import re
+
+    source = html.escape(str(value or ""), quote=False)
+    code_blocks = []
+
+    def hold_code(match):
+        code_blocks.append(match.group(1))
+        return f"\x00CODE{len(code_blocks) - 1}\x00"
+
+    source = re.sub(r"(?s)\x60\x60\x60(?:[A-Za-z0-9_+.-]+)?[ \t]*\n(.*?)\x60\x60\x60", hold_code, source)
+    source = re.sub(r"(?s)\x60([^\n\x60]+)\x60", lambda m: f"<code>{m.group(1)}</code>", source)
+    source = re.sub(r"(?m)^#{1,6}[ \t]+(.+)$", r"<b>\1</b>", source)
+    source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", source)
+    source = re.sub(r"(?<!\\*)\*(?!\s)(.+?)(?<!\s)\*(?!\\*)|(?<!_)_(?!\s)(.+?)(?<!\s)_(?!_)", lambda m: f"<i>{next(g for g in m.groups() if g is not None)}</i>", source)
+    source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
+    source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
+    source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
+    source = re.sub(r"(?m)^\s*\d+[.)]\s+(.+)$", r"\1", source)
+    source = source.replace("\n", "<br>")
+    for index, code in enumerate(code_blocks):
+        source = source.replace(f"\x00CODE{index}\x00", f"<pre>{code}</pre>")
+    return source
+
 import io
 import json
 import logging
@@ -1184,7 +1215,11 @@ class Api:
                 signature = (post.get("signature") or "").strip()
                 if signature:
                     message_text = f"{message_text}\n\n{signature}"
-                payload = {"chat_id": ch["chat_id"], "text": message_text}
+                payload = {
+                    "chat_id": ch["chat_id"],
+                    "text": _markdown_to_eitaa_html(message_text),
+                    "parse_mode": "HTML",
+                }
                 if post["title"]:
                     payload["title"] = post["title"]
                 if post["silent"]:
