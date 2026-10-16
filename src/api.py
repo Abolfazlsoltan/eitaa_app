@@ -22,6 +22,21 @@ import asyncio
 import csv
 import datetime as dt
 
+import io
+import json
+import logging
+import mimetypes
+import random
+import re
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+
+from ai import AIServiceError, AnonymousAI
+import config
+
+
 def _markdown_to_eitaa_html(value: str) -> str:
     """Convert the safe, common Markdown subset to Eitaa Bot API HTML.
 
@@ -42,7 +57,7 @@ def _markdown_to_eitaa_html(value: str) -> str:
     source = re.sub(r"(?s)\x60([^\n\x60]+)\x60", lambda m: f"<code>{m.group(1)}</code>", source)
     source = re.sub(r"(?m)^#{1,6}[ \t]+(.+)$", r"<b>\1</b>", source)
     source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", source)
-    source = re.sub(r"(?<!\\*)\*(?!\s)(.+?)(?<!\s)\*(?!\\*)|(?<!_)_(?!\s)(.+?)(?<!\s)_(?!_)", lambda m: f"<i>{next(g for g in m.groups() if g is not None)}</i>", source)
+    source = re.sub(r"(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)|(?<!_)_([^_\\n]+)_(?!_)", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
     source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
     source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
     source = re.sub(r"(?m)^\s*[-*+]\s+(.+)$", r"• \1", source)
@@ -52,19 +67,6 @@ def _markdown_to_eitaa_html(value: str) -> str:
         source = source.replace(f"\x00CODE{index}\x00", f"<pre>{code}</pre>")
     return source
 
-import io
-import json
-import logging
-import mimetypes
-import random
-import re
-from typing import Any
-from urllib.parse import urlparse
-
-import httpx
-
-from ai import AIServiceError, AnonymousAI
-import config
 
 
 logger = logging.getLogger(__name__)
