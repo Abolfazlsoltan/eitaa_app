@@ -2149,6 +2149,15 @@ class App:
             self.page.update()
             try:
                 result = await self.api.ai(action, src)
+                # Keep the generated text readable as it is revealed rather
+                # than replacing the whole editor in one sudden jump.
+                body_f.value = ""
+                _refresh_preview()
+                chunk_size = 48
+                for end in range(chunk_size, len(result), chunk_size):
+                    body_f.value = result[:end]
+                    _refresh_preview()
+                    await asyncio.sleep(0.02)
                 body_f.value = result
                 _refresh_preview()
                 self.toast("آماده شد")
