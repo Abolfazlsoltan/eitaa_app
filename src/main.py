@@ -1941,8 +1941,15 @@ class App:
             }
             self.chat_messages.append(assistant_message)
             rebuild()
+            def on_chunk(chunk: str):
+                assistant_message["status"] = "streaming"
+                assistant_message["text"] += chunk
+                rebuild()
+
             try:
-                reply = await self.api.ai("create", text, prompt=text)
+                reply = await self.api.ai(
+                    "create", text, prompt=text, on_chunk=on_chunk,
+                )
             except ApiError as e:
                 # Keep the user's text recoverable and offer a one-tap retry.
                 prompt.value = text
@@ -1975,13 +1982,15 @@ class App:
                 return
 
             user_message["status"] = "ready"
-            assistant_message["status"] = "streaming"
-            # Reveal the answer in small chunks to avoid a sudden full-text jump.
-            chunk_size = 72
-            for end in range(chunk_size, len(reply), chunk_size):
-                assistant_message["text"] = reply[:end]
-                rebuild()
-                await asyncio.sleep(0.025)
+            # Providers stream live when supported; retain a safe fallback for
+            # mocked/offline clients that return only a completed string.
+            if not assistant_message["text"]:
+                assistant_message["status"] = "streaming"
+                chunk_size = 48
+                for end in range(chunk_size, len(reply), chunk_size):
+                    assistant_message["text"] = reply[:end]
+                    rebuild()
+                    await asyncio.sleep(0.02)
             assistant_message["text"] = reply
             assistant_message["status"] = "ready"
             chat_state["sending"] = False
