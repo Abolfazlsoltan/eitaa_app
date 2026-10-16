@@ -1000,7 +1000,7 @@ class Api:
                         previous_by_id.values(),
                         key=lambda item: int(item["source_post_id"]),
                         reverse=True,
-                    )[:100]
+                    )[:500]
                 ]
             raise ApiError(str(exc), retryable=True) from exc
 
@@ -1020,7 +1020,7 @@ class Api:
             archive = {}
         archive[key] = archived
         await self._save("public_history", archive)
-        return archived[:100]
+        return archived[:500]
 
     async def _device_history(self, params: dict) -> list[dict]:
         posts = await self._load("posts", [])
