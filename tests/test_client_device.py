@@ -37,6 +37,10 @@ class ClientDeviceModeTests(unittest.TestCase):
 
     def test_offline_scheduling_saves_a_valid_future_post(self):
         async def run():
+            await self.api.storage.set(
+                "data:channels",
+                json.dumps([{"id": 1, "title": "Test", "chat_id": "test"}]),
+            )
             scheduled_at = (
                 datetime.now(timezone.utc) + timedelta(hours=1)
             ).isoformat()
