@@ -222,7 +222,11 @@ class UISmokeTests(unittest.TestCase):
                 "اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد" in label
                 for label in labels
             ))
-            self.assertTrue(any("تلاش دوباره" in label for label in labels))
+            button_labels = [
+                control.content for control in self._find_controls(view, ft.TextButton)
+                if isinstance(control.content, str)
+            ]
+            self.assertTrue(any("تلاش دوباره" in label for label in button_labels))
             self.assertIn("/posts", self.app._api_read_errors)
 
         self.loop.run_until_complete(run())
@@ -285,7 +289,11 @@ class UISmokeTests(unittest.TestCase):
                 "اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد" in x
                 for x in labels
             ))
-            self.assertTrue(any("تلاش دوباره" in x for x in labels))
+            button_labels = [
+                control.content for control in self._find_controls(view, ft.TextButton)
+                if isinstance(control.content, str)
+            ]
+            self.assertTrue(any("تلاش دوباره" in x for x in button_labels))
             self.assertIn("/history/public", self.app._api_read_errors)
 
         self.loop.run_until_complete(run())
