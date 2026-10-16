@@ -103,10 +103,16 @@ jobs:
               image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
               image.save(destination, format="PNG", optimize=True)
 
-          with Image.open(destination) as check:
-              if check.format != "PNG" or check.size != (1024, 1024):
-                  raise SystemExit("Custom app icon failed validation")
-              print(f"Using custom launcher icon: {check.format} {check.size}")
+          # Use the same custom artwork on the Android launch screen too;
+          # otherwise Flet may fall back to its own splash illustration.
+          splash = Path("src/assets/splash.png")
+          splash.write_bytes(destination.read_bytes())
+
+          for path in (destination, splash):
+              with Image.open(path) as check:
+                  if check.format != "PNG" or check.size != (1024, 1024):
+                      raise SystemExit(f"Custom artwork failed validation: {path}")
+                  print(f"Using custom artwork: {path} {check.format} {check.size}")
           PY
 
       - name: Build APK
