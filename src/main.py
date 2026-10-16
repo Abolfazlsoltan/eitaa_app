@@ -1960,6 +1960,19 @@ class App:
                     pass
                 self.toast(str(e), error=True)
                 return
+            except Exception:
+                logger.exception("Unexpected AI chat failure")
+                prompt.value = text
+                user_message["status"] = "failed"
+                if assistant_message in self.chat_messages:
+                    self.chat_messages.remove(assistant_message)
+                chat_state["sending"] = False
+                rebuild()
+                self.toast(
+                    "ارتباط با دستیار ناموفق بود؛ متن درخواست حفظ شد.",
+                    error=True,
+                )
+                return
 
             user_message["status"] = "ready"
             assistant_message["status"] = "streaming"
