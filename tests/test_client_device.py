@@ -2,7 +2,7 @@ import asyncio
 import json
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -59,7 +59,7 @@ class ClientDeviceModeTests(unittest.TestCase):
             self.assertEqual(cached[0]["source_post_id"], 123)
             self.assertTrue(cached[0]["is_stale"])
 
-        self.loop.run_until_complete(run())
+        asyncio.run(run())
 
     def test_auth_state_does_not_claim_local_user_exists(self):
         with self.assertRaisesRegex(ApiError, "احراز هویت به اتصال سرور نیاز دارد"):
