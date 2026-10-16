@@ -30,7 +30,7 @@ class EitaaAdapterTests(unittest.IsolatedAsyncioTestCase):
             title="title",
             disable_notification=1,
             pin=1,
-            view_to_delete=100,
+            viewCountForDelete=100,
             reply_to_message_id=42,
         )
 
@@ -54,10 +54,10 @@ class EitaaAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         call.assert_awaited_once()
         args, kwargs = call.await_args
-        self.assertEqual(args[:2], ("test-token", "sendDocument"))
+        self.assertEqual(args[:2], ("test-token", "sendFile"))
         self.assertEqual(kwargs["chat_id"], "test-channel")
         self.assertEqual(kwargs["caption"], "caption")
-        self.assertEqual(kwargs["view_to_delete"], 5)
+        self.assertEqual(kwargs["viewCountForDelete"], 5)
         self.assertEqual(kwargs["reply_to_message_id"], 7)
         self.assertEqual(kwargs["files"]["file"][0], "test.pdf")
 
