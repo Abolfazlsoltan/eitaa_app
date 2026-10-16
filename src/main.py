@@ -3201,15 +3201,28 @@ async def main(page: ft.Page):
         asyncio.create_task(app._local_schedule_loop())
 
     def handle_keyboard_back(event):
-        key = str(getattr(event, "key", "") or "").lower()
-        event_type = str(getattr(event, "type", "") or "").lower()
-        if key in ("back", "escape", "browserback") and event_type in (
-            "", "keydown", "key-down"
-        ):
+        key = str(getattr(event, "key", "") or "").strip().lower()
+        key = key.replace(" ", "").replace("_", "").replace("-", "")
+        event_type = str(getattr(event, "type", "") or "").strip().lower()
+        event_type = event_type.replace("_", "").replace("-", "")
+        if key in (
+            "back", "escape", "browserback", "goback", "backbutton",
+        ) and event_type in ("", "keydown"):
             app.spawn(app.handle_back())
 
+    def handle_view_pop(event):
+        # This app uses one root view and manages its own logical screens.
+        # Prevent Navigator from popping that root and closing the app.
+        view = getattr(event, "view", None)
+        if view is not None:
+            try:
+                view.can_pop = False
+            except Exception:
+                logger.debug("Could not lock root view against native pop")
+        app.spawn(app.handle_back())
+
     page.on_keyboard_event = handle_keyboard_back
-    page.on_view_pop = lambda event: app.spawn(app.handle_back())
+    page.on_view_pop = handle_view_pop
     page.services.append(app.file_picker)
     page.services.append(app.url_launcher)
     page.on_platform_brightness_change = lambda e: (
