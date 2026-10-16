@@ -8,6 +8,31 @@ UNSUPPORTED = "این عملیات در API عمومی فعلی ایتایار �
 
 class EitaaError(Exception): pass
 
+def markdown_to_html(value: str) -> str:
+    """Render a common Markdown subset as escaped Bot API HTML."""
+    import html
+    source = html.escape(str(value or ""), quote=False)
+    code_blocks = []
+
+    def hold_code(match):
+        code_blocks.append(match.group(1))
+        return f"\x00CODE{len(code_blocks) - 1}\x00"
+
+    source = re.sub(r"(?s)\x60\x60\x60(?:[A-Za-z0-9_+.-]+)?[ \t]*\n(.*?)\x60\x60\x60", hold_code, source)
+    source = re.sub(r"(?s)\x60([^\n\x60]+)\x60", lambda m: f"<code>{m.group(1)}</code>", source)
+    source = re.sub(r"(?m)^#{1,6}[ \t]+(.+)$", r"<b>\1</b>", source)
+    source = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"<b>{m.group(1) or m.group(2)}</b>", source)
+    source = re.sub(r"\\*([^*\\n]+)\\*|_([^_\\n]+)_", lambda m: f"<i>{m.group(1) or m.group(2)}</i>", source)
+    source = re.sub(r"~~(.+?)~~", r"<s>\1</s>", source)
+    source = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', source)
+    source = re.sub(r"(?m)^\\s*[-*+]\\s+(.+)$", r"• \1", source)
+    source = re.sub(r"(?m)^\\s*\\d+[.)]\\s+(.+)$", r"\1", source)
+    source = source.replace("\\n", "<br>")
+    for index, code in enumerate(code_blocks):
+        source = source.replace(f"\\x00CODE{index}\\x00", f"<pre>{code}</pre>")
+    return source
+
+
 def normalize_channel(raw: str) -> str:
     raw = str(raw or "").strip()
     m = re.match(r"^(?:https?://)?(?:www\.)?eitaa\.com/([A-Za-z0-9_]+)/?$", raw)
@@ -57,7 +82,7 @@ async def send_message(
     token, chat_id, text, title="", silent=False, pin=False,
     view_to_delete=None, reply_to_message_id=None,
 ):
-    p = dict(chat_id=chat_id, text=text)
+    p = dict(chat_id=chat_id, text=markdown_to_html(text), parse_mode="HTML")
     if title: p["title"] = title
     if silent: p["disable_notification"] = 1
     if pin: p["pin"] = 1
