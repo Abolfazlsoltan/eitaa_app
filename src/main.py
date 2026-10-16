@@ -757,6 +757,17 @@ class App:
             self._nav_bar(NAV_VIEWS.index(name)) if name in NAV_VIEWS else None
         )
 
+        # When Page.views is populated, Flet renders the active View's
+        # navigation_bar and floating_action_button, not the Page-level
+        # properties. Mirror the shell controls onto the visible View so the
+        # bottom tabs and + action actually appear in the installed APK.
+        try:
+            active_view = self.page.views[-1]
+            active_view.navigation_bar = self.page.navigation_bar
+            active_view.floating_action_button = self.page.floating_action_button
+        except (AttributeError, IndexError):
+            logger.debug("No active Flet View available for shell controls")
+
         if name in NAV_VIEWS:
             # Tab views: render a lightweight skeleton while data loads.
             self.body.content = ft.Container(
