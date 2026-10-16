@@ -707,28 +707,39 @@ async def delete_published_message(pid: int, request: Request):
             prepared.append((delivery, channel, delivery.remote_message_id, token))
 
         errors = []
+        deleted = 0
         for delivery, channel, message_id, token in prepared:
             try:
                 await eitaa.delete_message(token, channel.chat_id, message_id)
+                delivery.status = "deleted"
+                delivery.done_at = now()
+                delivery.error = ""
+                deleted += 1
             except eitaa.EitaaError as exc:
+                delivery.error = str(exc)
                 errors.append({"channel_id": channel.id, "channel": channel.title, "error": str(exc)})
 
-        if errors:
-            raise HTTPException(
-                502,
-                detail={
-                    "message": "حذف پیام در ایتا کامل نشد؛ بعضی پیام‌ها ممکن است باقی مانده باشند.",
-                    "errors": errors,
-                },
-            )
-        for delivery, _channel, _message_id, _token in prepared:
-            delivery.status = "deleted"
-            delivery.done_at = now()
-        post.status = "deleted"
+        post.status = "deleted" if not errors else (
+            "partially_deleted" if deleted else "published"
+        )
         post.updated_at = now()
-        log(s, "delete_remote", f"پیام منتشرشده «{post.title or post.id}» حذف شد")
+        log(
+            s, "delete_remote",
+            f"حذف پیام «{post.title or post.id}»: "
+            f"{deleted}/{len(prepared)} کانال",
+        )
         s.commit()
-        return {"ok": True, "deleted_channels": len(prepared)}
+        return {
+            "ok": not errors,
+            "deleted_channels": deleted,
+            "total_channels": len(prepared),
+            "errors": errors,
+            "message": (
+                "پیام از همهٔ کانال‌ها حذف شد."
+                if not errors else
+                "حذف کامل نشد؛ وضعیت هر کانال در جزئیات انتشار ذخیره شد."
+            ),
+        }
 
 
 @app.get("/api/posts/{pid}/revisions")
