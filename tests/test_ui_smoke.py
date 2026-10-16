@@ -201,6 +201,32 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_posts_view_warns_when_loading_fails_instead_of_showing_empty_only(self):
+        async def run():
+            async def get(path):
+                if path == "/posts":
+                    raise ApiError("simulated connection failure")
+                if path == "/channels":
+                    return []
+                return {}
+
+            with patch.object(self.app.api, "get", new=AsyncMock(side_effect=get)):
+                view = await self.app.v_posts()
+
+            labels = [
+                control.value
+                for control in self._find_controls(view, ft.Text)
+                if isinstance(control.value, str)
+            ]
+            self.assertTrue(any(
+                "اتصال یا دریافت اطلاعات با مشکل روبه‌رو شد" in label
+                for label in labels
+            ))
+            self.assertTrue(any("تلاش دوباره" in label for label in labels))
+            self.assertIn("/posts", self.app._api_read_errors)
+
+        self.loop.run_until_complete(run())
+
     def test_unexpected_screen_errors_are_logged_and_offer_retry(self):
         async def run():
             async def broken_view():
