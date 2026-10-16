@@ -382,11 +382,25 @@ class App:
 
     # ------------------------------------------------------- modern header
     def gradient_header(self, title, *, subtitle=None, actions=None):
+        header_actions = list(actions or [])
+        needs_back = self.view not in (
+            "home", "posts", "settings", "auth", "onboarding",
+        )
+        has_back = any(
+            getattr(getattr(action, "content", None), "icon", None)
+            == ft.Icons.ARROW_FORWARD
+            for action in header_actions
+        )
+        if needs_back and not has_back:
+            header_actions.insert(0, self._header_icon(
+                ft.Icons.ARROW_FORWARD,
+                on_click=lambda e: self.spawn(self.handle_back()),
+            ))
         rows = [
             ft.Row([
                 T(title, size=22, weight=ft.FontWeight.BOLD, color="#FFFFFF",
                   expand=True),
-                *(actions or []),
+                *header_actions,
             ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         ]
         if subtitle:
