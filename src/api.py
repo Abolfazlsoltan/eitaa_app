@@ -333,6 +333,7 @@ class Api:
     async def ai(
         self, action: str, text: str, prompt: str = "",
         language: str = "fa", tone: str = "neutral", length: str = "medium",
+        on_chunk=None,
     ) -> str:
         # Validate and bound data before it leaves the device.
         action = action.strip() if isinstance(action, str) else ""
@@ -363,7 +364,8 @@ class Api:
                 "language": language,
                 "tone": tone,
                 "length": length,
-            }
+            },
+            on_chunk=on_chunk,
         )
         output = result.get("text") if isinstance(result, dict) else None
         if not isinstance(output, str) or not output.strip():
@@ -1379,7 +1381,7 @@ class Api:
         }
 
     # ------------------------------------------------------------ AI -------
-    async def _anonymous_ai(self, body: dict) -> dict:
+    async def _anonymous_ai(self, body: dict, on_chunk=None) -> dict:
         action = body.get("action") or ""
         text = body.get("text") or ""
         prompt = body.get("prompt") or ""
@@ -1423,7 +1425,12 @@ class Api:
             + (f"\n\n{text}" if text else "")
         )
         try:
-            output = await self._ai_client.complete(_SYSTEM, user_msg)
+            if on_chunk is None:
+                output = await self._ai_client.complete(_SYSTEM, user_msg)
+            else:
+                output = await self._ai_client.complete_stream(
+                    _SYSTEM, user_msg, on_chunk,
+                )
         except AIServiceError as exc:
             raise ApiError(str(exc), network=True, retryable=True) from exc
         return await self._record_ai_usage(action, text, output)
