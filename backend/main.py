@@ -663,10 +663,13 @@ async def edit_published_message(pid: int, b: RemoteEditIn, request: Request):
                     "errors": errors,
                 },
             )
+        previous_text = post.text
+        s.add(PostRevision(
+            post_id=post.id, title=post.title, text=previous_text,
+            signature=post.signature,
+        ))
         post.text = b.text
         post.updated_at = now()
-        s.add(PostRevision(post_id=post.id, title=post.title, text=post.text,
-                           signature=post.signature))
         log(s, "edit_remote", f"پیام منتشرشده «{post.title or post.id}» ویرایش شد")
         s.commit()
         return {"ok": True, "updated_channels": len(prepared)}
