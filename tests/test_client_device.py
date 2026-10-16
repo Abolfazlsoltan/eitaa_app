@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from api import Api, ApiError
+from public_history import PublicHistoryError
 from fa import to_local, to_utc_iso
 
 
@@ -26,6 +27,39 @@ class MemoryStorage:
 class ClientDeviceModeTests(unittest.TestCase):
     def setUp(self):
         self.api = Api(MemoryStorage())
+
+    def test_public_channel_history_is_archived_and_survives_fetch_failure(self):
+        async def run():
+            await self.api._save("channels", [{
+                "id": 7, "title": "نمونه", "chat_id": "sample_channel"
+            }])
+            first = [{
+                "id": "eitaa:sample_channel:123",
+                "source_post_id": 123,
+                "source_url": "https://eitaa.com/sample_channel/123",
+                "source": "eitaa_public",
+                "is_external": True,
+                "text": "پست قدیمی",
+                "created_at": "2026-10-15T10:00:00+00:00",
+                "deliveries": [],
+            }]
+            with patch("api.fetch_public_channel_history", new=AsyncMock(return_value=first)):
+                fresh = await self.api._device(
+                    "GET", "/history/public", None, params={"channel_id": 7}
+                )
+            self.assertEqual(fresh[0]["text"], "پست قدیمی")
+
+            with patch(
+                "api.fetch_public_channel_history",
+                new=AsyncMock(side_effect=PublicHistoryError("offline")),
+            ):
+                cached = await self.api._device(
+                    "GET", "/history/public", None, params={"channel_id": 7}
+                )
+            self.assertEqual(cached[0]["source_post_id"], 123)
+            self.assertTrue(cached[0]["is_stale"])
+
+        self.loop.run_until_complete(run())
 
     def test_auth_state_does_not_claim_local_user_exists(self):
         with self.assertRaisesRegex(ApiError, "احراز هویت به اتصال سرور نیاز دارد"):
