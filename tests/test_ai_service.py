@@ -98,6 +98,26 @@ class AnonymousAIServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("unturf", str(raised.exception).lower())
         self.assertEqual(client.post.await_count, 2)
 
+    async def test_complete_stream_forwards_each_chunk_to_the_callback(self):
+        client = AnonymousAI()
+        chunks = []
+
+        async def fake_stream(url, model, system, user, emit):
+            emit("پاسخ")
+            emit(" آماده")
+            return "پاسخ آماده"
+
+        with (
+            patch("ai.random.shuffle", side_effect=lambda items: None),
+            patch.object(client, "_post_completion_stream", new=AsyncMock(
+                side_effect=fake_stream,
+            )),
+        ):
+            result = await client.complete_stream("system", "prompt", chunks.append)
+
+        self.assertEqual(result, "پاسخ آماده")
+        self.assertEqual(chunks, ["پاسخ", " آماده"])
+
     async def test_timeout_on_first_provider_falls_back(self):
         client = mock_http_client(
             posts=[
