@@ -20,9 +20,10 @@ match the upstream public services and are safe to ship as-is.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -191,6 +192,68 @@ class AnonymousAI:
             "اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
         )
 
+    async def complete_stream(
+        self, system: str, user: str, on_chunk: Callable[[str], None],
+    ) -> str:
+        """Stream generated text to the callback as provider tokens arrive.
+
+        If a provider fails before sending text, try the next provider. Once
+        text has been displayed, surface a mid-stream failure rather than
+        silently restarting and duplicating the answer.
+        """
+        if not isinstance(system, str) or not isinstance(user, str):
+            raise AIServiceError("درخواست نامعتبر برای دستیار هوشمند.")
+        system, user = system.strip(), user.strip()
+        if not user:
+            raise AIServiceError("لطفاً ابتدا متن یا توضیح درخواست را وارد کنید.")
+        if len(system) + len(user) > _MAX_PROMPT_CHARS:
+            raise AIServiceError(
+                "متن درخواست خیلی طولانی است؛ آن را کوتاه‌تر کنید و دوباره تلاش کنید."
+            )
+
+        providers = list(self._PROVIDER_ORDER)
+        random.shuffle(providers)
+        failures: list[tuple[str, BaseException]] = []
+
+        for provider in providers:
+            emitted = {"count": 0}
+
+            def emit(chunk: str) -> None:
+                emitted["count"] += 1
+                on_chunk(chunk)
+
+            try:
+                if provider == "pollinations":
+                    url, model = self._POLLINATIONS_URL, self._POLLINATIONS_MODEL
+                else:
+                    url, model = self._UNCLOSEAI_URL, await self._uncloseai_model()
+                return await self._post_completion_stream(
+                    url, model, system, user, emit,
+                )
+            except AIServiceError as exc:
+                if emitted["count"]:
+                    raise AIServiceError(
+                        "پاسخ هوش مصنوعی هنگام دریافت ناتمام ماند؛ دوباره تلاش کنید."
+                    ) from exc
+                failures.append((provider, exc))
+                logger.info("Streaming AI provider %s failed: %s", provider, exc)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                if emitted["count"]:
+                    raise AIServiceError(
+                        "ارتباط هنگام دریافت پاسخ هوش مصنوعی قطع شد؛ دوباره تلاش کنید."
+                    ) from exc
+                failures.append((provider, exc))
+                logger.info(
+                    "Streaming AI provider %s raised %s",
+                    provider, type(exc).__name__,
+                )
+
+        logger.warning("All streaming AI providers failed (%d attempts).", len(failures))
+        raise AIServiceError(
+            "دستیار هوشمند در حال حاضر پاسخگو نیست. "
+            "اتصال اینترنت را بررسی کنید و دوباره تلاش کنید."
+        )
+
     # ---------------------------------------------------- provider paths ---
     async def _complete_pollinations(self, system: str, user: str) -> str:
         return await self._post_completion(
@@ -276,6 +339,75 @@ class AnonymousAI:
             ) from exc
 
         return self._extract_content(body)
+
+    async def _post_completion_stream(
+        self, url: str, model: str, system: str, user: str,
+        on_chunk: Callable[[str], None],
+    ) -> str:
+        parsed_url = urlparse(url)
+        if parsed_url.scheme != "https" or not parsed_url.hostname:
+            raise AIServiceError("نشانی سرویس هوش مصنوعی معتبر نیست.")
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        headers = {"Content-Type": "application/json"}
+        chunks: list[str] = []
+        total_chars = 0
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._dynamic_timeout(system, user),
+            ) as client:
+                async with client.stream(
+                    "POST", url, headers=headers, json=payload,
+                ) as response:
+                    if response.status_code != 200:
+                        raise AIServiceError("Public AI service rejected the request.")
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            packet = json.loads(data)
+                        except ValueError:
+                            continue
+                        choices = packet.get("choices") if isinstance(packet, dict) else None
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                        content = delta.get("content") if isinstance(delta, dict) else None
+                        if isinstance(content, list):
+                            content = "".join(
+                                block.get("text", "")
+                                for block in content
+                                if isinstance(block, dict)
+                                and isinstance(block.get("text"), str)
+                            )
+                        if isinstance(content, str) and content:
+                            total_chars += len(content)
+                            if total_chars > _MAX_RESPONSE_CHARS:
+                                raise AIServiceError("Public AI service returned an oversized response.")
+                            chunks.append(content)
+                            on_chunk(content)
+        except AIServiceError:
+            raise
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            raise AIServiceError("Public AI streaming request failed.") from exc
+
+        result = "".join(chunks).strip()
+        if not result:
+            raise AIServiceError("Public AI service returned an empty response.")
+        return result
 
     # ---------------------------------------------------------- parsing ----
     @staticmethod
