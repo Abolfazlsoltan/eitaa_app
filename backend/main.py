@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete as sql_delete, func, select, update
 
 from . import ai, analytics, auth, eitaa
+from src.public_history import PublicHistoryError, fetch_public_channel_history
 from .db import (
     ActivityLog,
     AIUsage,
@@ -607,6 +608,23 @@ def history(
             )
         statement = statement.offset(offset).limit(limit)
         return [_post_record(s, p) for p in s.scalars(statement)]
+
+
+@app.get("/api/history/public")
+async def public_channel_history(
+    channel_id: int = Query(..., ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Read public channel posts from Eitaa's web view, not only app sends."""
+    with Session() as s:
+        channel = s.get(Channel, channel_id)
+        if not channel:
+            raise HTTPException(404, "کانال پیدا نشد.")
+        username = str(channel.chat_id or "").strip().lstrip("@")
+    try:
+        return await fetch_public_channel_history(username, limit=limit)
+    except PublicHistoryError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @app.get("/api/posts/{pid}/revisions")
