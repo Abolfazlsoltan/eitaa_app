@@ -1996,18 +1996,96 @@ class App:
             "متن پست",
             value=(post or {}).get("text", ""),
             multiline=True,
-            min_lines=6,
-            max_lines=14,
+            min_lines=4,
+            max_lines=8,
         )
 
-        # Channel selection
         self.channels = await self._safe_get("/channels", self.channels)
-        state = {"selected": set()}
+        state = {"selected": set(), "date": None, "time": None, "busy": False}
         if post:
-            for d in post.get("deliveries", []):
-                cid = d.get("channel_id")
+            for delivery in post.get("deliveries", []):
+                cid = delivery.get("channel_id")
                 if cid is not None:
                     state["selected"].add(cid)
+
+        form_error = ft.Container(
+            visible=False,
+            padding=12,
+            border_radius=12,
+            bgcolor=Palette.DANGER_SOFT,
+            border=ft.Border.all(1, Palette.DANGER),
+        )
+
+        def show_form_error(message: str | None = None):
+            form_error.visible = bool(message)
+            form_error.content = (
+                ft.Row([
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=Palette.DANGER, size=20),
+                    ft.Container(
+                        content=T(message or "", size=13, color=Palette.DANGER),
+                        expand=True,
+                    ),
+                ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.START)
+                if message else None
+            )
+            self.page.update()
+
+        def clear_form_error():
+            if form_error.visible:
+                form_error.visible = False
+                self.page.update()
+
+        # Native pickers open as dialogs and stay inside the visible screen.
+        date_f = tf("تاریخ انتشار", value="", read_only=True, expand=True)
+        time_f = tf("ساعت انتشار", value="", read_only=True, expand=True)
+
+        now = dt.datetime.now()
+        date_picker = ft.DatePicker(
+            first_date=now.date(),
+            last_date=(now + dt.timedelta(days=30)).date(),
+            on_change=None,
+        )
+        time_picker = ft.TimePicker(on_change=None)
+
+        def on_date_change(e):
+            value = getattr(e.control, "value", None)
+            if value:
+                state["date"] = value.date() if isinstance(value, dt.datetime) else value
+                date_f.value = state["date"].strftime("%Y-%m-%d")
+                clear_form_error()
+                self.page.update()
+
+        def on_time_change(e):
+            value = getattr(e.control, "value", None)
+            if value:
+                state["time"] = value
+                time_f.value = value.strftime("%H:%M")
+                clear_form_error()
+                self.page.update()
+
+        date_picker.on_change = on_date_change
+        time_picker.on_change = on_time_change
+
+        scheduling_available = bool(self.api.online)
+        schedule_note = T(
+            "زمان‌بندی خودکار در این حالت به سرور متصل نیاز دارد. ابتدا سرور را در تنظیمات وصل کنید."
+            if not scheduling_available else
+            "انتشار زمان‌بندی‌شده روی سرور اجرا می‌شود؛ تاریخ و ساعت را انتخاب کنید.",
+            size=12,
+            color=Palette.MUTED,
+        )
+
+        def open_date(_=None):
+            if not scheduling_available:
+                show_form_error("زمان‌بندی تا زمان اتصال به سرور غیرفعال است؛ برای ارسال فوری از دکمه انتشار استفاده کنید.")
+                return
+            self.page.show_dialog(date_picker)
+
+        def open_time(_=None):
+            if not scheduling_available:
+                show_form_error("برای زمان‌بندی خودکار ابتدا سرور را متصل کنید.")
+                return
+            self.page.show_dialog(time_picker)
 
         channel_checks = []
         for ch in self.channels:
@@ -2017,21 +2095,15 @@ class App:
                         state["selected"].add(channel["id"])
                     else:
                         state["selected"].discard(channel["id"])
+                    clear_form_error()
                     _refresh_preview()
                 return on_change
-            channel_checks.append(
-                ft.Checkbox(
-                    label=ch["title"],
-                    value=ch["id"] in state["selected"],
-                    on_change=make_toggle(),
-                )
-            )
+            channel_checks.append(ft.Checkbox(
+                label=ch.get("title") or str(ch.get("channel_id") or "کانال"),
+                value=ch["id"] in state["selected"],
+                on_change=make_toggle(),
+            ))
 
-        # Schedule
-        date_f = tf("تاریخ (YYYY-MM-DD)", hint_text="مثلاً 2026-10-20")
-        time_f = tf("ساعت (HH:MM)", hint_text="مثلاً 14:30")
-
-        # AI quick actions
         ai_row = ft.Row([
             ft.Container(
                 content=T(label, size=12, color=Palette.PRIMARY,
@@ -2041,17 +2113,14 @@ class App:
                 border=ft.Border.all(1, Palette.BORDER),
                 bgcolor=ft.Colors.with_opacity(0.04, Palette.PRIMARY),
                 ink=True,
-                on_click=lambda e, a=action: self.spawn(
-                    _run_ai(a)
-                ),
+                on_click=lambda e, a=action: self.spawn(_run_ai(a)),
             )
             for action, label, _ in AI_ACTIONS[:6]
         ], spacing=8, scroll=ft.ScrollMode.AUTO)
 
         preview = ft.Container(
-            content=T("پیش‌نمایش اینجا نمایش داده می‌شود", size=13,
-                      color=Palette.MUTED),
-            padding=16,
+            content=T("پیش‌نمایش متن پست", size=13, color=Palette.MUTED),
+            padding=14,
             border_radius=16,
             bgcolor=Palette.CARD,
             border=ft.Border.all(1, Palette.BORDER),
@@ -2063,7 +2132,8 @@ class App:
             preview.content = ft.Column([
                 T(title or "بدون عنوان", size=15,
                   weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                T(text or "متن خالی است", size=13, color=Palette.MUTED),
+                T(text or "هنوز متنی وارد نشده است", size=13, color=Palette.MUTED),
+                T(f"{len(text)} نویسه", size=11, color=Palette.MUTED),
             ], spacing=6, tight=True)
             self.page.update()
 
@@ -2071,21 +2141,23 @@ class App:
         title_f.on_change = _refresh_preview
 
         async def _run_ai(action: str):
-            src = (body_f.value or "").strip() or (title_f.value or "").strip()
-            if not src and action != "create":
-                return self.toast("متنی برای پردازش وارد کنید", error=True)
+            src_text = (body_f.value or "").strip() or (title_f.value or "").strip()
+            if not src_text and action != "create":
+                show_form_error("ابتدا متن یا عنوانی برای پردازش وارد کنید.")
+                return
             try:
-                result = await self.api.ai(action, src)
+                result = await self.api.ai(action, src_text)
                 body_f.value = result
+                clear_form_error()
                 _refresh_preview()
-                self.toast("آماده شد")
-            except ApiError as e:
-                self.toast(str(e), error=True)
+            except ApiError as exc:
+                show_form_error(self._safe_message(str(exc)))
 
         async def save_draft(_=None):
             text = (body_f.value or "").strip()
             if not text:
-                return self.toast("متن پست خالی است", error=True)
+                show_form_error("برای ذخیره پیش‌نویس، متن پست را وارد کنید.")
+                return
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
@@ -2099,15 +2171,17 @@ class App:
                     await self.api.post("/posts", payload)
                 self.toast("پیش‌نویس ذخیره شد")
                 await self.go("posts", "draft")
-            except ApiError as e:
-                self.toast(str(e), error=True)
+            except ApiError as exc:
+                show_form_error(self._safe_message(str(exc)))
 
         async def publish_now(_=None):
             text = (body_f.value or "").strip()
             if not text:
-                return self.toast("متن پست خالی است", error=True)
+                show_form_error("متن پست خالی است.")
+                return
             if not state["selected"]:
-                return self.toast("حداقل یک کانال انتخاب کنید", error=True)
+                show_form_error("حداقل یک کانال برای انتشار انتخاب کنید.")
+                return
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
@@ -2121,21 +2195,37 @@ class App:
                     await self.api.post("/posts", payload)
                 self.toast("درخواست انتشار ثبت شد؛ وضعیت را در فهرست پست‌ها ببینید.")
                 await self.go("posts")
-            except ApiError as e:
-                self.toast(str(e), error=True)
+            except ApiError as exc:
+                show_form_error(self._safe_message(str(exc)))
 
         async def schedule(_=None):
+            if not scheduling_available:
+                show_form_error("زمان‌بندی خودکار در حال حاضر فعال نیست؛ برای استفاده از آن باید به سرور متصل شوید.")
+                return
             text = (body_f.value or "").strip()
             if not text:
-                return self.toast("متن پست خالی است", error=True)
+                show_form_error("برای زمان‌بندی، متن پست را وارد کنید.")
+                return
             if not state["selected"]:
-                return self.toast("حداقل یک کانال انتخاب کنید", error=True)
-            when = combine_local(
-                (date_f.value or "").strip(),
-                (time_f.value or "").strip(),
-            )
+                show_form_error("حداقل یک کانال برای زمان‌بندی انتخاب کنید.")
+                return
+            if state["date"] is None:
+                show_form_error("تاریخ انتشار را با انتخاب‌گر تاریخ انتخاب کنید.")
+                return
+            if state["time"] is None:
+                show_form_error("ساعت انتشار را با انتخاب‌گر ساعت انتخاب کنید.")
+                return
+            try:
+                when = combine_local(state["date"].strftime("%Y-%m-%d"),
+                                     state["time"].strftime("%H:%M"))
+            except (TypeError, ValueError, AttributeError):
+                when = None
             if when is None:
-                return self.toast("تاریخ و ساعت معتبر وارد کنید", error=True)
+                show_form_error("تاریخ و ساعت انتخاب‌شده معتبر نیست.")
+                return
+            if when <= dt.datetime.now():
+                show_form_error("زمان انتشار باید در آینده باشد.")
+                return
             payload = {
                 "title": (title_f.value or "").strip(),
                 "text": text,
@@ -2148,13 +2238,10 @@ class App:
                     await self.api.put(f"/posts/{post_id}", payload)
                 else:
                     await self.api.post("/posts", payload)
-                self.toast(
-                    "زمان‌بندی شد" if self.api.online else
-                    "زمان‌بندی ثبت شد؛ برای اجرای خودکار، برنامه باید باز بماند."
-                )
+                self.toast("پست زمان‌بندی شد.")
                 await self.go("posts", "scheduled")
-            except ApiError as e:
-                self.toast(str(e), error=True)
+            except ApiError as exc:
+                show_form_error(self._safe_message(str(exc)))
 
         header = self.gradient_header(
             "ویرایش پست" if post else "پست جدید",
@@ -2166,39 +2253,124 @@ class App:
             ],
         )
 
-        return ft.Column([
-            header,
-            ft.Container(
-                content=ft.Column([
-                    title_f,
-                    body_f,
-                    T("ابزارهای هوشمند", size=13,
-                      weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                    ai_row,
-                    T("کانال‌ها", size=13,
-                      weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                    *(channel_checks or [
-                        T("کانالی ثبت نشده — از تنظیمات اضافه کنید",
+        channel_section = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.CAMPAIGN_OUTLINED, color=Palette.PRIMARY, size=20),
+                    T("کانال‌های مقصد", size=14, weight=ft.FontWeight.W_600,
+                      color=Palette.TEXT),
+                    ft.Container(expand=True),
+                    T(f"{len(state['selected'])} انتخاب", size=12, color=Palette.MUTED),
+                ], spacing=8),
+                ft.Column(
+                    channel_checks or [
+                        T("هنوز کانالی ثبت نشده است؛ از تنظیمات کانال اضافه کنید.",
                           size=12, color=Palette.MUTED)
-                    ]),
-                    T("زمان‌بندی (اختیاری)", size=13,
-                      weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                    ft.Row([date_f, time_f], spacing=10),
-                    T("پیش‌نمایش", size=13,
-                      weight=ft.FontWeight.W_600, color=Palette.TEXT),
-                    preview,
-                    ft.Container(height=8),
-                    btn_primary("انتشار فوری",
-                                lambda e: self.spawn(publish_now())),
-                    btn_ghost("زمان‌بندی",
-                              lambda e: self.spawn(schedule())),
-                    btn_ghost("ذخیره پیش‌نویس",
-                              lambda e: self.spawn(save_draft())),
-                ], spacing=12, scroll=ft.ScrollMode.AUTO),
-                padding=16,
-                expand=True,
-            ),
-        ], spacing=0, expand=True)
+                    ],
+                    spacing=2,
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                    height=min(124, max(54, len(channel_checks) * 42)),
+                ),
+            ], spacing=8, tight=True),
+            padding=12,
+            border_radius=16,
+            bgcolor=Palette.CARD,
+            border=ft.Border.all(1, Palette.BORDER),
+        )
+
+        schedule_section = ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon(ft.Icons.SCHEDULE, color=Palette.PRIMARY, size=20),
+                    T("زمان‌بندی انتشار", size=14, weight=ft.FontWeight.W_600,
+                      color=Palette.TEXT),
+                    ft.Container(expand=True),
+                    pill("فعال" if scheduling_available else "نیازمند سرور",
+                         Palette.SUCCESS if scheduling_available else Palette.WARNING),
+                ], spacing=8),
+                schedule_note,
+                ft.Row([
+                    ft.OutlinedButton(
+                        "انتخاب تاریخ",
+                        icon=ft.Icons.CALENDAR_MONTH,
+                        on_click=open_date if scheduling_available else None,
+                        disabled=not scheduling_available,
+                        expand=True,
+                    ),
+                    ft.OutlinedButton(
+                        "انتخاب ساعت",
+                        icon=ft.Icons.ACCESS_TIME,
+                        on_click=open_time if scheduling_available else None,
+                        disabled=not scheduling_available,
+                        expand=True,
+                    ),
+                ], spacing=8),
+                ft.Row([date_f, time_f], spacing=8),
+            ], spacing=10, tight=True),
+            padding=14,
+            border_radius=16,
+            bgcolor=Palette.CARD,
+            border=ft.Border.all(1, Palette.BORDER),
+        )
+
+        content = ft.Column([
+            title_f,
+            body_f,
+            T("ابزارهای هوشمند", size=13, weight=ft.FontWeight.W_600,
+              color=Palette.TEXT),
+            ai_row,
+            channel_section,
+            schedule_section,
+            form_error,
+            T("پیش‌نمایش", size=13, weight=ft.FontWeight.W_600,
+              color=Palette.TEXT),
+            preview,
+            ft.Container(height=4),
+        ], spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
+
+        actions = ft.Container(
+            content=ft.Row([
+                ft.Container(
+                    content=T("انتشار فوری", color="#FFFFFF",
+                              weight=ft.FontWeight.W_600, size=13),
+                    bgcolor=Palette.PRIMARY,
+                    border_radius=13,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+                    alignment=ft.Alignment(0, 0),
+                    ink=True,
+                    on_click=lambda e: self.spawn(publish_now()),
+                    expand=True,
+                ),
+                ft.Container(
+                    content=T("زمان‌بندی", color=Palette.TEXT if scheduling_available else Palette.MUTED,
+                              weight=ft.FontWeight.W_600, size=13),
+                    bgcolor=Palette.PRIMARY_SOFT if scheduling_available else Palette.BORDER,
+                    border_radius=13,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=13),
+                    alignment=ft.Alignment(0, 0),
+                    ink=scheduling_available,
+                    on_click=(lambda e: self.spawn(schedule())) if scheduling_available else None,
+                    opacity=1 if scheduling_available else 0.6,
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Icon(ft.Icons.SAVE_OUTLINED, color=Palette.PRIMARY, size=21),
+                    tooltip="ذخیره پیش‌نویس",
+                    border=ft.Border.all(1, Palette.BORDER),
+                    border_radius=13,
+                    padding=12,
+                    alignment=ft.Alignment(0, 0),
+                    ink=True,
+                    on_click=lambda e: self.spawn(save_draft()),
+                ),
+            ], spacing=8),
+            padding=ft.Padding.only(left=14, right=14, top=10, bottom=12),
+            bgcolor=Palette.SURFACE_LIGHT,
+            border=ft.Border.only(top=ft.BorderSide(1, Palette.BORDER)),
+        )
+
+        return ft.Column([header, content, actions], spacing=0, expand=True)
 
     async def v_settings(self):
         theme_mode = await self.api.storage.get("appearance_theme") or "system"
