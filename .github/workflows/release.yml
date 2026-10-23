@@ -1,0 +1,168 @@
+name: Signed Android Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build (for example v2.2.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: signed-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Test, build and publish signed APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      APP_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      DATABASE_URL: "sqlite:///./test-ci.db"
+      AI_API_KEY: "ci-test-key"
+      AI_PROVIDER: "groq"
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "flet==1.0.4" "httpx>=0.27,<1.0" -r backend/requirements.txt
+
+      - name: Run automated tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          config_text = Path("src/config.py").read_text()
+          import ast
+          module = ast.parse(config_text)
+          config_version = next(
+              ast.literal_eval(node.value)
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(
+                  isinstance(target, ast.Name) and target.id == "VERSION"
+                  for target in node.targets
+              )
+          )
+          if config_version != project_version:
+              raise SystemExit(
+                  f"Version mismatch: pyproject.toml={project_version!r}, "
+                  f"src/config.py={config_version!r}"
+              )
+          expected = "v" + project_version
+          supplied = os.environ["RELEASE_TAG"]
+          if supplied != expected:
+              raise SystemExit(f"Release tag {supplied!r} does not match project version {expected!r}")
+          print(f"Releasing {expected}")
+          PY
+
+      - name: Set up Java
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Flet build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "flet[all]==1.0.4" pillow
+
+      - name: Restore and validate app artwork
+        run: |
+          set -euo pipefail
+          test -s assets/icon.png
+          mkdir -p src/assets
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+
+          source = Path("assets/icon.png")
+          icon = Path("src/assets/icon.png")
+          with Image.open(source) as image:
+              image = image.convert("RGBA")
+              side = min(image.size)
+              left = (image.width - side) // 2
+              top = (image.height - side) // 2
+              image = image.crop((left, top, left + side, top + side))
+              image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
+              image.save(icon, format="PNG", optimize=True)
+          Path("src/assets/splash.png").write_bytes(icon.read_bytes())
+          for path in (icon, Path("src/assets/splash.png")):
+              with Image.open(path) as image:
+                  if image.format != "PNG" or image.size != (1024, 1024):
+                      raise SystemExit(f"Invalid artwork: {path}")
+          PY
+
+      - name: Require release signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required release signing secret: $name"
+              exit 1
+            fi
+          done
+          KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          echo "FLET_ANDROID_SIGNING_KEY_STORE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "FLET_ANDROID_SIGNING_KEY_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "FLET_ANDROID_SIGNING_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "FLET_ANDROID_SIGNING_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build signed APK
+        run: flet build apk --verbose --yes --build-number "$GITHUB_RUN_NUMBER"
+
+      - name: Verify APK artifact exists
+        run: |
+          set -euo pipefail
+          compgen -G "build/apk/*.apk" > /dev/null || {
+            echo "::error::No APK was produced"
+            exit 1
+          }
+          ls -lh build/apk/*.apk
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/apk/*.apk --clobber
+          else
+            gh release create "$RELEASE_TAG" build/apk/*.apk \
+              --title "Eitaa Manager $RELEASE_TAG" \
+              --generate-notes
+          fi
