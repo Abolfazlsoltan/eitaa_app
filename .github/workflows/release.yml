@@ -59,14 +59,21 @@ jobs:
 
           project_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
           config_text = Path("src/config.py").read_text()
-          import re
-          match = re.search(r'^VERSION\\s*=\\s*["\\']([^"\\']+)["\\']', config_text, re.MULTILINE)
-          if not match:
-              raise SystemExit("Could not read VERSION from src/config.py")
-          if match.group(1) != project_version:
+          import ast
+          module = ast.parse(config_text)
+          config_version = next(
+              ast.literal_eval(node.value)
+              for node in module.body
+              if isinstance(node, ast.Assign)
+              and any(
+                  isinstance(target, ast.Name) and target.id == "VERSION"
+                  for target in node.targets
+              )
+          )
+          if config_version != project_version:
               raise SystemExit(
                   f"Version mismatch: pyproject.toml={project_version!r}, "
-                  f"src/config.py={match.group(1)!r}"
+                  f"src/config.py={config_version!r}"
               )
           expected = "v" + project_version
           supplied = os.environ["RELEASE_TAG"]
