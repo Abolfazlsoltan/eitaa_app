@@ -51,6 +51,25 @@ class UISmokeTests(unittest.TestCase):
 
         self.loop.run_until_complete(run())
 
+    def test_draft_card_exposes_edit_and_delete_actions(self):
+        card = self.app._post_card(
+            {
+                "id": 42,
+                "status": "draft",
+                "title": "پیش‌نویس آزمایشی",
+                "text": "متن آزمایشی",
+                "deliveries": [],
+            },
+            {},
+        )
+        labels = [
+            control.text
+            for control in self._find_controls(card, ft.TextButton)
+        ]
+        self.assertIn("ویرایش", labels)
+        self.assertIn("حذف پیش‌نویس", labels)
+        self.assertNotIn("لغو", labels)
+
     def test_ai_settings_and_core_views_construct_with_installed_flet(self):
         async def run():
             await self.app.api.bootstrap()
