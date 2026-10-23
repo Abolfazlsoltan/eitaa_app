@@ -63,7 +63,11 @@ class UISmokeTests(unittest.TestCase):
             {},
         )
         labels = [
-            control.text
+            (
+                control.content
+                if isinstance(control.content, str)
+                else getattr(control.content, "value", None)
+            )
             for control in self._find_controls(card, ft.TextButton)
         ]
         self.assertIn("ویرایش", labels)
