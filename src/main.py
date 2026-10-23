@@ -1597,16 +1597,10 @@ class App:
             T(channel_names, size=11, color=Palette.MUTED),
         ]
 
-        if status in CANCELLABLE:
-            body.append(ft.Row([
-                ft.TextButton(
-                    "لغو",
-                    icon=ft.Icons.CLOSE,
-                    on_click=lambda e, i=post["id"]: self.spawn(
-                        self._cancel_post(i)),
-                ),
-            ], alignment=ft.MainAxisAlignment.END))
-        elif status == "draft":
+        # Drafts need their own edit/delete actions. Since "draft" is also
+        # cancellable, check it first or the generic cancel branch shadows
+        # these actions and makes saved drafts impossible to edit or delete.
+        if status == "draft":
             body.append(ft.Row([
                 ft.TextButton(
                     "ویرایش",
@@ -1619,6 +1613,15 @@ class App:
                     icon=ft.Icons.DELETE_OUTLINE,
                     on_click=lambda e, i=post["id"]: self.spawn(
                         self._delete_draft(i)),
+                ),
+            ], alignment=ft.MainAxisAlignment.END))
+        elif status in CANCELLABLE:
+            body.append(ft.Row([
+                ft.TextButton(
+                    "لغو",
+                    icon=ft.Icons.CLOSE,
+                    on_click=lambda e, i=post["id"]: self.spawn(
+                        self._cancel_post(i)),
                 ),
             ], alignment=ft.MainAxisAlignment.END))
         else:
